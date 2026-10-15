@@ -5,7 +5,7 @@ import { z } from "zod";
  * kind (connection string). Atlas/MCP kinds are reserved for later phases
  * but defined here so the schema is stable.
  */
-export const SourceKind = z.enum(["direct", "atlas", "mcp", "opsmanager"]);
+export const SourceKind = z.enum(["direct", "atlas", "mcp", "opsmanager", "offline"]);
 export type SourceKind = z.infer<typeof SourceKind>;
 
 export const SourceSchema = z.object({
@@ -42,6 +42,41 @@ export const SourceSchema = z.object({
     })
     .optional(),
   tags: z.array(z.string()).optional(),
+  /**
+   * FTDC ingest provenance: what diagnostic data was imported, from where, and
+   * the time range it covered — WITHOUT storing the raw bytes. Lets operators see
+   * what history has been ingested and re-import gaps. Appended on each import.
+   */
+  ftdcProvenance: z
+    .object({
+      /** Per-ingest events, most-recent last (capped to a recent window). */
+      imports: z
+        .array(
+          z.object({
+            at: z.string(), // ISO timestamp of the import
+            input: z.string().optional(), // the path(s) the operator pointed at
+            filesProcessed: z.number().int().nonnegative(),
+            nodes: z.array(z.string()), // host:port seen in this batch
+            metricPointsAdded: z.number().int().nonnegative(),
+            /** Data time range covered by this batch (ISO), if known. */
+            coveredFrom: z.string().optional(),
+            coveredTo: z.string().optional(),
+          }),
+        )
+        .default([]),
+      /** Per-node coverage roll-up across all imports (earliest→latest, ISO). */
+      nodes: z
+        .record(
+          z.string(), // host:port
+          z.object({
+            from: z.string(),
+            to: z.string(),
+            lastImportedAt: z.string(),
+          }),
+        )
+        .default({}),
+    })
+    .optional(),
   /** Scheduling + threshold overrides for this deployment. */
   schedule: z
     .object({

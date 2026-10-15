@@ -10,11 +10,12 @@
     "ps-agent": "./dist/cli/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/risks && cp src/risks/risks-catalog.json dist/risks/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "scan": "tsx src/cli/index.ts scan",
     "dev": "tsx src/cli/index.ts",
-    "start": "node dist/cli/index.js"
+    "start": "node dist/cli/index.js",
+    "risks:convert": "tsx scripts/convertRiskRegister.ts"
   },
   "dependencies": {
     "@langchain/core": "^0.3.40",

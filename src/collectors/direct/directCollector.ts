@@ -4,6 +4,7 @@ import type { Source } from "../../core/source.js";
 import type {
   CollectedFacts,
   ConnectionStats,
+  HostInfo,
   IndexUsage,
   OpCounters,
   ReplMember,
@@ -71,6 +72,8 @@ export class DirectCollector implements Collector {
 
     const indexUsage = await this.collectIndexUsage(warnings);
     const storage = await this.collectStorage(warnings);
+    const hostInfo = await this.collectHostInfo(admin, warnings);
+    const serverParameters = await this.collectServerParameters(admin, warnings);
 
     return {
       sourceId: this.source.id,
@@ -81,6 +84,8 @@ export class DirectCollector implements Collector {
       replSetStatus,
       indexUsage,
       storage,
+      hostInfo,
+      serverParameters,
       collectionMethod: "direct",
       warnings,
     };
@@ -225,6 +230,37 @@ export class DirectCollector implements Collector {
    * databases and captures instance-wide filesystem usage (WiredTiger reports
    * fsUsedSize/fsTotalSize in dbStats). Missing privilege → warning, not failure.
    */
+  /** Host hardware (RAM/cores/OS) via hostInfo — gives real limits for capacity. */
+  private async collectHostInfo(admin: Db, warnings: string[]): Promise<HostInfo | undefined> {
+    const raw = await this.safeCommand(admin, { hostInfo: 1 }, warnings, undefined, true);
+    if (!raw) return undefined;
+    const system = raw.system ?? {};
+    const os = raw.os ?? {};
+    return {
+      hostname: system.hostname,
+      cpuCores: system.numCores ?? system.numPhysicalCores,
+      memSizeMB: system.memSizeMB ?? system.memLimitMB,
+      os: os.type ? `${os.type}${os.version ? " " + os.version : ""}` : os.name,
+      numaEnabled: system.numaEnabled,
+      extra: raw.extra && typeof raw.extra === "object" ? raw.extra : undefined,
+    };
+  }
+
+  /** Selected server parameters (getParameter '*') for config-risk checks. */
+  private async collectServerParameters(
+    admin: Db,
+    warnings: string[],
+  ): Promise<Record<string, unknown> | undefined> {
+    const raw = await this.safeCommand(admin, { getParameter: "*" }, warnings, undefined, true);
+    if (!raw) return undefined;
+    // Drop the command envelope fields.
+    const { ok, operationTime, $clusterTime, ...params } = raw as Record<string, unknown>;
+    void ok;
+    void operationTime;
+    void $clusterTime;
+    return params;
+  }
+
   private async collectStorage(warnings: string[]): Promise<StorageFacts | undefined> {
     try {
       const adminDb = this.client.db("admin");

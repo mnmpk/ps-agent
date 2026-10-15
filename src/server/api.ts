@@ -4,6 +4,7 @@ import { renderDashboard } from "./dashboard.js";
 import { Scheduler } from "../scheduler/scheduler.js";
 import { bus, type AgentEvent } from "../events/bus.js";
 import { closeMongoClient } from "../store/mongo/client.js";
+import { isMultipart, parseMultipart } from "./multipart.js";
 
 /**
  * Minimal HTTP API + dashboard for the health agent.
@@ -100,6 +101,56 @@ async function handle(
     return;
   }
 
+  // --- Risk catalog management ---
+  if (method === "GET" && path === "/api/catalog") {
+    return sendJson(res, 200, await service.listCatalog());
+  }
+  if (method === "GET" && path === "/api/catalog/export") {
+    res.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="risks-catalog.json"',
+    });
+    res.end(JSON.stringify(await service.exportCatalog(), null, 2));
+    return;
+  }
+  if (method === "POST" && path === "/api/catalog") {
+    const body = await readJsonBody(req);
+    if (!body?.name) return sendJson(res, 400, { error: "name is required" });
+    return sendJson(res, 201, await service.upsertCatalogEntry(body));
+  }
+  if (method === "POST" && path === "/api/catalog/import") {
+    const raw = await readRawBody(req);
+    let data: unknown;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return sendJson(res, 400, { error: "body must be JSON ({risks:[…]} or an array)" });
+    }
+    const mode = url.searchParams.get("mode") === "replace" ? "replace" : "merge";
+    try {
+      const n = await service.importCatalog(data as any, mode);
+      return sendJson(res, 200, { imported: n, mode });
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
+  }
+  const catalogId = path.match(/^\/api\/catalog\/([^/]+)$/);
+  if (catalogId && catalogId[1] !== "export" && catalogId[1] !== "import") {
+    const id = decodeURIComponent(catalogId[1]!);
+    if (method === "PATCH") {
+      const body = await readJsonBody(req);
+      if (typeof body?.enabled === "boolean") {
+        const updated = await service.setCatalogEntryEnabled(id, body.enabled);
+        return sendJson(res, updated ? 200 : 404, updated ?? { error: "not found" });
+      }
+      return sendJson(res, 200, await service.upsertCatalogEntry({ ...body, id }));
+    }
+    if (method === "DELETE") {
+      const ok = await service.deleteCatalogEntry(id);
+      return sendJson(res, ok ? 200 : 404, { removed: ok });
+    }
+  }
+
   // Live event stream (SSE): scan.started/completed/failed, schedule.changed.
   if (method === "GET" && path === "/api/events") {
     res.writeHead(200, {
@@ -130,6 +181,99 @@ async function handle(
 
   if (method === "GET" && path === "/api/sources") {
     return sendJson(res, 200, await service.listSources());
+  }
+
+  // Offline import: raw body = the getMongoData.js log (JSON array).
+  // Optional query params: ?name=... &sourceId=... (to update an existing one).
+  if (method === "POST" && path === "/api/sources/offline/import") {
+    const raw = await readRawBody(req);
+    if (!raw) return sendJson(res, 400, { error: "empty body; POST the getMongoData log" });
+    try {
+      const scan = await service.importGetMongoData(raw, {
+        name: url.searchParams.get("name") ?? undefined,
+        sourceId: url.searchParams.get("sourceId") ?? undefined,
+      });
+      return sendJson(res, 200, scan);
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
+  }
+
+  // mdiag import: raw body = the mdiag.sh --json export. Standalone
+  // (/api/sources/mdiag/import) creates an offline source; the per-source form
+  // (/api/sources/:id/mdiag/import) enriches that source with OS facts.
+  const mdiagPerSource = path.match(/^\/api\/sources\/([^/]+)\/mdiag\/import$/);
+  if (method === "POST" && (path === "/api/sources/mdiag/import" || mdiagPerSource)) {
+    const raw = await readRawBody(req);
+    if (!raw) return sendJson(res, 400, { error: "empty body; POST the mdiag --json export" });
+    const sourceId = mdiagPerSource
+      ? decodeURIComponent(mdiagPerSource[1]!)
+      : url.searchParams.get("sourceId") ?? undefined;
+    try {
+      const scan = await service.importMdiag(raw, {
+        name: url.searchParams.get("name") ?? undefined,
+        sourceId,
+      });
+      return sendJson(res, 200, scan);
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
+  }
+
+  // FTDC import: binary body = one diagnostic.data/metrics.* archive file.
+  // Standalone (/api/sources/ftdc/import) creates an offline source from the
+  // FTDC snapshot + metrics; the per-source form (/api/sources/:id/ftdc/import)
+  // enriches that source and appends its capacity time-series.
+  const ftdcPerSource = path.match(/^\/api\/sources\/([^/]+)\/ftdc\/import$/);
+  if (method === "POST" && (path === "/api/sources/ftdc/import" || ftdcPerSource)) {
+    const buf = await readRawBuffer(req);
+    if (!buf.length) return sendJson(res, 400, { error: "empty body; POST a metrics.* FTDC file" });
+    const sourceId = ftdcPerSource
+      ? decodeURIComponent(ftdcPerSource[1]!)
+      : url.searchParams.get("sourceId") ?? undefined;
+    try {
+      const scan = await service.importFtdc(buf, {
+        name: url.searchParams.get("name") ?? undefined,
+        sourceId,
+        input: url.searchParams.get("filename") ?? "upload",
+      });
+      return sendJson(res, 200, scan);
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
+  }
+
+  // Unified diagnostics import: one multipart/form-data upload carrying ANY mix
+  // of getMongoData / mdiag / FTDC files (a whole folder, multiple nodes). Each
+  // part is streamed to a temp file; importBundle auto-classifies + ingests into
+  // one cluster source, then the temp files are removed.
+  const bundlePerSource = path.match(/^\/api\/sources\/([^/]+)\/import$/);
+  if (method === "POST" && (path === "/api/sources/import" || bundlePerSource)) {
+    if (!isMultipart(req)) {
+      return sendJson(res, 400, {
+        error: "expected multipart/form-data with one or more 'files' parts",
+      });
+    }
+    const sourceId = bundlePerSource
+      ? decodeURIComponent(bundlePerSource[1]!)
+      : url.searchParams.get("sourceId") ?? undefined;
+    let parsed: Awaited<ReturnType<typeof parseMultipart>> | null = null;
+    try {
+      parsed = await parseMultipart(req);
+      if (parsed.files.length === 0) {
+        return sendJson(res, 400, { error: "no files in upload" });
+      }
+      const name = parsed.fields.name ?? url.searchParams.get("name") ?? undefined;
+      const result = await service.importBundle(
+        parsed.files.map((f) => ({ filename: f.filename, path: f.path })),
+        { name, sourceId },
+      );
+      return sendJson(res, 200, result);
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    } finally {
+      if (parsed) await parsed.cleanup();
+    }
   }
 
   if (method === "POST" && path === "/api/sources") {
@@ -240,6 +384,17 @@ async function handle(
     }
   }
 
+  // Risk register assessment (expert catalog cross-referenced vs this cluster).
+  const sourceRisks = path.match(/^\/api\/sources\/([^/]+)\/risks$/);
+  if (method === "GET" && sourceRisks) {
+    const id = decodeURIComponent(sourceRisks[1]!);
+    try {
+      return sendJson(res, 200, await service.getRiskReport(id));
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
+  }
+
   const sourceId = path.match(/^\/api\/sources\/([^/]+)$/);
   if (method === "DELETE" && sourceId) {
     const ok = await service.removeSource(decodeURIComponent(sourceId[1]!));
@@ -302,4 +457,18 @@ async function readJsonBody(req: IncomingMessage): Promise<any> {
   } catch {
     return null;
   }
+}
+
+/** Read the raw request body as a string (for large getMongoData log uploads). */
+async function readRawBody(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Read the raw request body as a Buffer (for binary FTDC uploads). */
+async function readRawBuffer(req: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks);
 }

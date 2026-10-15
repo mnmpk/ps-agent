@@ -318,6 +318,273 @@ ps-agent/
 6. ✅ **Scheduler + live updates**: in-process per-source cadence (jitter + overlap guard), SSE event stream, per-source threshold config, live dashboard. (BullMQ/Redis + WebSocket are drop-in alternatives behind the same interfaces.)
 7. ✅ **MCP collector + hardening**: MCP-backed collector (stdio/http), credential encryption at rest (AES-256-GCM), append-only audit log. Remediation remains advisory-only (drafted by the `suggest_remediation` chat tool, never executed).
 8. ✅ **Capacity, bottleneck & cost intelligence** (8a–8d + Ops Manager collector all done) — see §14.
+9. ✅ **Offline mode (getMongoData import)** — see §15.
+10. ✅ **Risk register engine** (expert catalog + deterministic + LLM matching) — see §16.
+
+---
+
+## 16. Phase 10 — Expert risk register engine
+
+An expert-authored risk register (`risk register.xlsx`, 81 MongoDB risks with
+level / probability / impact / description / recommendation) becomes a
+cluster-analysis engine.
+
+### 16.1 Pipeline
+- **Convert** `scripts/convertRiskRegister.ts` → committed `src/risks/risks-catalog.json`
+  (`npm run risks:convert "<file>"`). Reads xlsx directly (zip+XML, no deps);
+  normalizes levels (0-High→high …). The .xlsx itself is gitignored.
+- **Deterministic evaluators** (`src/risks/evaluators.ts`) match catalog risks by
+  keyword and check them against `CollectedFacts` → detected / clear / unknown
+  with evidence (EOL version, unused indexes, storage capacity, EAR, oplog window, …).
+- **LLM-assisted matcher** (`src/risks/llmMatcher.ts`) cross-references the
+  remaining "manual" risks against the facts → advisory "suggested" matches,
+  schema-constrained, evidence-required, conservative (skips org/process risks).
+- **Report** `HealthService.getRiskReport(sourceId)` → `RiskReport` with per-risk
+  status (detected/clear/manual/suggested/unknown) + counts, sorted worst-first.
+
+### 16.2 UX
+- `GET /api/sources/:id/risks`; dashboard **Risk register** button → panel showing
+  detected & suggested up front, with collapsible manual-review and clear/unknown.
+- Works for any source with a scan — including **offline** (getMongoData) imports,
+  so isolated clusters get the full expert risk assessment.
+
+### 16.4 OS-level risks via mdiag
+getMongoData can't see OS/kernel tunings, so `src/collectors/mdiag/parse.ts`
+imports an **mdiag.sh --json** export → `OsFacts` (swappiness, max_map_count, TCP
+keepalive, THP + defrag, read-ahead, ulimits, SELinux, NUMA, I/O scheduler).
+`HealthService.importMdiag(raw, {sourceId})` **enriches an existing source's latest
+scan** (or creates a standalone offline source) and re-scores, so the OS-tuning
+register evaluators fire. Channels: dashboard **"Attach mdiag"** button,
+`POST /api/sources/:id/mdiag/import`, `ps-agent import --mdiag --file … --source`.
+Verified with a realistic mdiag fixture: attaching it moved 7 OS risks from
+unknown→detected (SELinux enforcing, low fd, low max_map_count, swappiness 60,
+keepalive 7200, readahead 4096, THP always), total detected 3→10.
+
+### 16.3 Status — ✅ Done (catalog now mutable; see 16.5)
+Verified against a real getMongoData export: 81 risks assessed. Deterministic
+evaluators cover EOL version, unused indexes, storage capacity, EAR, oplog window,
+**TLS-not-enforced** (`tlsMode`), **log redaction** (`redactClientLogData`),
+majority read concern, NUMA, file descriptors, THP (the OS tunings fire when the
+data is present; some need mdiag/Linux). Collectors now also capture
+`serverParameters` (getParameter '*') and host `extra`.
+
+**Register findings are unified into the normal findings/risk-inbox**: every
+deterministically-*detected* register risk becomes a `register.<id>` Finding
+(level→severity: high→critical, medium→warning, low→info) with the register's
+recommendation. LLM-*suggested* matches stay exclusive to the on-demand Risk
+Register view (no LLM on every scan). Example run: detected #62 TLS-not-enforced
+(critical), #8 log-redaction-off (warning), #51 storage (info).
+
+### 16.5 Mutable catalog store + management UI
+The committed `risks-catalog.json` is now only the **seed**. A `CatalogStore`
+(`src/store/catalogStore.ts`) holds the runtime-editable catalog:
+- `FileCatalogStore` (`~/.ps-agent/risk-catalog.json`, atomic serialized writes) or
+  `MongoCatalogStore` (collection `risk_catalog`), auto-selected by `createStores()`.
+  Both **seed from the committed JSON on first use** (empty store), then own edits.
+- `RiskCatalogEntry.enabled` gates assessment: `getRiskReport` and the active
+  catalog (`setActiveCatalog`/`getActiveCatalog`, refreshed by the service) only
+  include `enabled !== false`, so **disabled risks are skipped entirely** — no
+  assessment, no finding.
+- `HealthService` CRUD: `listCatalog`, `upsertCatalogEntry` (auto-ids new entries),
+  `deleteCatalogEntry`, `setCatalogEntryEnabled`, `exportCatalog`,
+  `importCatalog(data, "merge"|"replace")` (accepts `{risks:[…]}` or a bare array,
+  drops entries missing id/name). Every mutation refreshes the active catalog + audits.
+- API: `GET/POST /api/catalog`, `PATCH/DELETE /api/catalog/:id`,
+  `GET /api/catalog/export` (JSON download), `POST /api/catalog/import?mode=merge|replace`.
+- Dashboard **Risk catalog** tab: table with per-row enable/disable toggle,
+  add/edit (modal)/delete, Export JSON, and Import. xlsx is converted offline via
+  `npm run risks:convert` then imported as JSON.
+
+---
+
+## 15. Phase 9 — Offline mode via getMongoData
+
+Most production clusters are network-isolated; the agent can't dial them. The
+MongoDB support script **getMongoData.js** is the canonical read-only diagnostic:
+an operator runs it on one node and ships the resulting JSON log out. We import
+that log to produce a full health + config + capacity snapshot — no connection.
+
+### 15.1 What getMongoData provides
+A JSON array of `{ section, subsection, output, host, ts }` entries, including:
+- `server_info/server_status_info` → full `serverStatus()`
+- `server_info/host_info` → **RAM, cores, OS** (hardware limits for utilization)
+- `server_info/command_line_info` → auth/TLS/security
+- `server_info/server_build_info`, `server_parameters`
+- `shard_or_replicaset_info`, `replicaset_info/replica_status` → topology + repl
+- `data_info/database_stats_(mb)`, `collection_stats_(mb)` → storage
+- `data_info/index_stats`, `indexes` → index usage (unused/redundant)
+
+### 15.2 Shared parser (reuse)
+`src/collectors/getmongodata/parse.ts` turns a getMongoData array into
+`CollectedFacts` (+ a `StorageFacts` + a host-limits object). Used by BOTH:
+- the **offline importer** (kind: `offline`), and
+- an **enhanced DirectCollector** (optionally runs the same admin commands —
+  `hostInfo`, `dbStats`, `buildInfo` — to fill RAM/cores/limits for live sources).
+
+### 15.3 Offline source + import
+- New source `kind: "offline"` holding the imported snapshot id / metadata (no
+  credentials). Importing a file creates/updates the source and persists a scan.
+- Import channels: **dashboard upload**, `POST /api/sources/offline/import`
+  (raw body = the log), and `ps-agent import --file getMongoData.log`.
+- Capacity for offline = **point-in-time utilization** vs hostInfo RAM/cores +
+  disk from dbStats/host; config/schema/index findings. No growth/days-until-full
+  from a single export (would need multiple dated imports — future).
+
+### 15.4 Notes
+- getMongoData runs on one node → topology/repl come from that node's view.
+- Parser is defensive: versions vary, sections may be missing/partial; degrade to
+  warnings, never throw on a malformed entry.
+- Offline snapshots never expire from scheduling (no scans run against them).
+
+### 15.5 Offline capacity metrics via FTDC
+getMongoData is a single point-in-time snapshot, so offline clusters had no
+**time-series** for growth/utilization trends (that came only from the
+Atlas/OpsManager metrics APIs). MongoDB's **FTDC** (Full-Time Diagnostic Data
+Capture) fills this gap: mongod samples serverStatus + OS metrics ~once per second
+into binary `diagnostic.data/metrics.*` files on the host. Shipping those files
+out gives real CPU/memory/disk/IOPS history with no network access — the offline
+equivalent of the metrics API.
+
+**Decoder** (`src/collectors/ftdc/decode.ts`): pure, dependency-light reader of the
+FTDC archive format (ref: mongo `db/ftdc/README.md`). A file is a stream of BSON
+docs; type-0 = metadata (serverStatus/hostInfo reference), type-1 = a compressed
+metric chunk. Each chunk's `data` = `uint32 uncompressedSize` + zlib payload, which
+inflates to `referenceDoc | uint32 metricCount | uint32 deltaCount | varint block`.
+The reference doc is sample 0; the block holds, metric-major, `deltaCount` deltas
+per numeric leaf (plain unsigned varints over wrapping uint64 — **not** zig-zag —
+with zero-runs RLE-encoded as `0, additionalCount`). We reconstruct an
+`n × (1+deltaCount)` value matrix and per-sample wall-clock timestamps (the `start`
+metric is itself a tracked Date). Uses `BSON` from the `mongodb` dep + `node:zlib`;
+no new dependency. Validated against a real mongod 8.2 file and a synthetic
+Linux-shaped chunk (CPU normalization, disk space, IOPS all exact).
+
+**Parser** (`src/collectors/ftdc/parse.ts`): maps decoded chunks to
+- `CollectedFacts` (version/hostInfo/serverStatus from the newest reference +
+  latest sample) → a scan + health score, like getMongoData; and
+- `MetricSeries[]` using the **canonical capacity keys** the engine understands:
+  `CACHE_USED_BYTES` (WT cache, gauge), `SYSTEM_NORMALIZED_CPU_USER/_KERNEL`
+  (cumulative `systemMetrics.cpu.*_ms` → %/core via per-interval delta ÷
+  interval ÷ cores), `DISK_PARTITION_SPACE_USED/_FREE` (from
+  `systemMetrics.mounts.<mount>`), `DISK_PARTITION_IOPS_TOTAL`
+  (Σ `systemMetrics.disks.<dev>.{reads,writes}` rate), plus opcounter rates.
+  OS-level CPU/disk only exist in FTDC on **Linux** (`/proc`); the serverStatus
+  gauges (cache, connections, opcounters) are always present.
+
+**Import — raw files stay local; only downsampled series are stored.** Raw FTDC is
+large (~3,200 metrics × 1 sample/s × N nodes → GBs). We deliberately do **not** copy
+it into the agent store; we decode it, extract a curated set of ~11 capacity series,
+and **downsample each series to hourly buckets** (`src/collectors/ftdc/downsample.ts`)
+before it reaches the metric store.
+
+- **Why downsample:** FTDC samples ~1 Hz — ~3,600× finer than the resolution the
+  rest of the system uses. Atlas/OpsManager request **PT1H** history and the
+  capacity engine targets hourly (`DEFAULT_HISTORY=PT1H`, `MIN_POINTS=6`,
+  `MIN_SPAN_DAYS=2`). Full per-second import would store ~85 M points **per node**
+  per 90 days (one Mongo doc each); hourly brings it to ~24 K — parity with Atlas,
+  ~3,600× fewer — with no analytical loss (verified: OLS trend/day, days-until-full
+  and R²≈1.0 are exact on hourly data).
+- **Aggregation per series type** (`aggForMetric`): gauges (cache / disk-used /
+  disk-free / connections) → **mean** per bucket; spiky rate series (CPU user/kernel,
+  IOPS, opcounters) → **max** per bucket, so the engine's p95 still reflects real
+  peaks instead of smoothed averages. Bucket timestamps are floored to the hour, so
+  re-importing overlapping files stays idempotent (same bucket ts → merge-by-ts).
+  Bucket width is `PT1H` by default, overridable via `PS_AGENT_FTDC_BUCKET_SECONDS`.
+
+Two entry points:
+
+- `HealthService.importFtdcFiles(filePaths, {name, sourceId})` — the scalable path
+  (CLI). Reads, decodes, and `appendPoints` **one file at a time**, freeing each
+  buffer before the next, so a multi-GB, multi-node import stays within bounded
+  memory (verified: ~0 MB heap growth across files). All nodes map to a **single**
+  offline source; each node keeps its own `processId` (host:port) series, and
+  capacity rolls up across nodes via the store's busiest-node max aggregation.
+- `HealthService.importFtdc(buffer, {name, sourceId})` — single in-memory buffer,
+  used by the HTTP upload route (bounded by one uploaded file).
+
+Both are idempotent (points merged by timestamp), so re-importing overlapping
+files — or a whole `diagnostic.data` directory spanning days — is safe. With a
+`sourceId` the import **enriches** that source (keeps a getMongoData scan's richer
+topology/storage, layers in FTDC hostInfo + metrics) — so the recommended flow is
+import getMongoData first (topology/config/risks), then attach FTDC (capacity
+trends).
+
+**Provenance (metadata only, no bytes).** Each import appends an event to
+`source.ftdcProvenance` — `{ at, input, filesProcessed, nodes[],
+metricPointsAdded, coveredFrom/To }` — and rolls up per-node coverage
+(`nodes[host:port] = { from, to, lastImportedAt }`, earliest→latest across
+imports; events capped to the most recent 50). This lets operators see *what*
+history has been ingested per node and spot gaps to re-import, without the agent
+ever storing the raw FTDC. It rides through `redactSource`, so `GET /api/sources`
+exposes it; the dashboard detail view shows a per-node `from→to` summary.
+
+Channels: dashboard **"Attach FTDC"** (single-file binary upload),
+`POST /api/sources/:id/ftdc/import` (+ standalone `/api/sources/ftdc/import`),
+and `ps-agent import --ftdc --file <diagnostic.data dir | metrics.* | dir1,dir2>`
+(a directory, a single file, or comma-separated paths — one per node).
+This unlocks **growth + days-until-full + utilization trends offline**, whereas
+getMongoData alone gives only point-in-time utilization (§15.3).
+
+### 15.5 Status — ✅ Done
+- `parse.ts` handles canonical EJSON (`$numberInt/$numberLong/$numberDouble/$oid/$date`)
+  and the `ERROR:` footer; verified against a **real 551 KB getMongoData export**
+  (MongoDB 8.2): serverStatus, hostInfo (cores/RAM/OS), replSet, dbStats→storage,
+  index_stats→index usage. Findings fired: auth/TLS/EOL, unused + redundant indexes,
+  index-bloat.
+- `HealthService.importGetMongoData(raw)` → offline source + persisted scan;
+  `scanSource` re-scores the last import for offline sources.
+- Channels: dashboard **file upload** (Offline option), `POST /api/sources/offline/import`
+  (raw body), `ps-agent import --file <log>`.
+- DirectCollector enhanced with `hostInfo` (RAM/cores) too → live self-managed sources
+  get real capacity limits (verified: 12 cores / 24 GB).
+
+### 15.6 Unified diagnostics import (any mix, auto-detected)
+The three offline inputs have different scopes — getMongoData is **cluster-level**
+(one file), mdiag and FTDC are **node-level** (one file per node, and FTDC often
+many files per node). Attaching them one-by-one via separate typed buttons was
+painful for a real multi-node bundle. The unified importer removes that friction:
+the user drops a **whole folder** (or multi-selects any mix of files) and the
+agent figures out the rest.
+
+- **Content sniffer** (`src/collectors/detect.ts`): classifies each file by its
+  bytes — `getMongoData` / `mdiag` / `ftdc` / `unknown`. FTDC is identified by its
+  precise binary signature (first BSON doc begins with an `_id` UTC-datetime
+  element — `09 5f 69 64 00`), which cleanly excludes WiredTiger `.wt` and other
+  binaries; the two JSON kinds are told apart by their section vocabulary. Works
+  on a 4 KiB prefix, so multi-GB FTDC is never fully read just to classify.
+- **`HealthService.importBundle(files[], {name, sourceId})`**: classifies every
+  file, then ingests in dependency order — **getMongoData first** (sets the
+  cluster source + topology/config), then **mdiag** (per-node OS facts merged onto
+  the cluster scan; no longer requires a prior scan — it bootstraps one if
+  needed), then **FTDC** (per-node metric series, streamed from disk via
+  `importFtdcFiles`). Everything lands in **one cluster source**; nodes stay
+  distinct via per-node `processId` series and per-node provenance. Returns a
+  per-file classification + roll-up (counts, nodes, points) for display.
+- **Node-identity reconciliation** (`src/core/nodeIdentity.ts`): the three sources
+  name the same box differently — getMongoData member names (`host:port`, usually
+  FQDN), FTDC (`host:port` or bare host), mdiag (bare hostname). A reconciler seeded
+  with the authoritative `replSetStatus.members[].name` roster collapses each
+  observed id onto its canonical member name (exact → host-match → FQDN/short-host,
+  case-insensitive; confident matches only, else the id stays its own node). So the
+  import roll-up lists each physical node **once** instead of 2–3 times. (Stored
+  FTDC series keep their raw `processId`; reconciliation is for the node roster /
+  display and capacity already rolls up across processes.) The dashboard's per-node
+  FTDC provenance panel applies the same matcher client-side (seeded from the
+  current scan's replica-set members), collapsing raw `host:port` provenance keys
+  onto canonical names and merging their coverage ranges.
+- **Channels:**
+  - Dashboard: a single **"Import diagnostics…"** action (and the "Offline
+    (import diagnostics)" add-deployment option) — multi-file or whole-folder
+    (`webkitdirectory`) upload, one `multipart/form-data` request.
+  - HTTP: `POST /api/sources/import` (new source) and
+    `POST /api/sources/:id/import` (enrich) — multipart. A tiny dependency-free
+    streaming multipart parser (`src/server/multipart.ts`) writes each part to a
+    **temp file**, so even a multi-GB upload stays bounded and FTDC is streamed by
+    path (temp files removed after).
+  - CLI: `ps-agent import --dir <folder>` (recurses, skips dbpath noise like
+    `*.wt`/journal/lock) — the easiest path for large on-disk bundles. A directory
+    passed to `--file` without a type flag is treated the same way.
+- The old typed endpoints/flags (`--mdiag`, `--ftdc`, `/api/sources/*/mdiag|ftdc/import`)
+  remain for scripted/single-file use; the unified path is the default UX.
 
 ---
 

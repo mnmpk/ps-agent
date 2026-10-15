@@ -17,6 +17,7 @@ function collectorFor(source: Source): Collector {
     case "atlas":
     case "mcp":
     case "opsmanager":
+    case "offline":
       throw new Error(
         `Legacy runScan supports 'direct' only; use runGraphScan for ${source.kind}.`,
       );

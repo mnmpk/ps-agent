@@ -1,0 +1,815 @@
+{
+  "generatedAt": "2026-10-15T03:28:37.161Z",
+  "risks": [
+    {
+      "id": "1",
+      "level": "high",
+      "status": "Active",
+      "probability": "Likely",
+      "impact": "Moderate",
+      "name": "Unable to Retrieve Script Outputs: Inability to retrieve script outputs from private cloud-hosted services may hinder troubleshooting and incident resolution.",
+      "description": "HSBC personnel do not have access to private cloud hosted instances and as such are unable to execute scripts on them to collect data.\r\n \r\n - FTDC can be retrieved.\r\n - getMongoData - executed externally - cannot be retrieved\r\n - mdiag - requires to be ran on the host cannot be retrieved.",
+      "recommendation": ""
+    },
+    {
+      "id": "2",
+      "level": "high",
+      "status": "Manifested",
+      "probability": "Likely",
+      "impact": "Moderate",
+      "name": "Customer SELinux policy can cause permission issues when starting MongoDB.",
+      "description": "SELinux can cause permission issues when starting MongoDB, potentially preventing the service from accessing necessary files or directories, which may result in startup failures or restricted functionality.",
+      "recommendation": "Starting in MongoDB 5.0, a new SELinux policy is available for MongoDB installations that uses standard default configuration. Because HSBC uses a custom config file HSBC needs to test the SELinux policy it adopt. I am marking this risk as accepted because service owner are responsible to test the selinux configuration"
+    },
+    {
+      "id": "3",
+      "level": "high",
+      "status": "Active",
+      "probability": "Likely",
+      "impact": "Moderate",
+      "name": "Oplog window too small",
+      "description": "There is a risk that nodes will fall off the oplog during a short outage and require manual re-sync",
+      "recommendation": ""
+    },
+    {
+      "id": "4",
+      "level": "high",
+      "status": "Active",
+      "probability": "Likely",
+      "impact": "Moderate",
+      "name": "Linear Disk Setup in Logical Volumes: Logical volumes made up of multiple disks in a linear configuration may cause performance degradation and increase susceptibility to slow disk I/O.",
+      "description": "Linear connection is slower than striping disks creating a potential performance impact when one of the disks is heavily loaded.",
+      "recommendation": ""
+    },
+    {
+      "id": "5",
+      "level": "high",
+      "status": "Manifested",
+      "probability": "Likely",
+      "impact": "Severe",
+      "name": "Complex, Regulated Environment: Operating in a highly complex, regulated environment may increase the difficulty of diagnosing and mitigating MongoDB issues.",
+      "description": "- many virtualisation SW \r\n - large complex estate \r\n - multiple proprietary components",
+      "recommendation": ""
+    },
+    {
+      "id": "6",
+      "level": "high",
+      "status": "Mitigated",
+      "probability": "Possible",
+      "impact": "Severe",
+      "name": "Insufficient Workload Throttling: The current workload throttling approach may be inadequate to prevent system outages during periods of high load.",
+      "description": "Currently application throttling is done at the F5 load balancer which cuts off traffic when certain latency thresholds are reached. Load balancer health checks are performed every 30 seconds. After 3 failed health-checks a service will be marked unavailable even if is still operational. When marked unavailable no requests will be directed to host until the health-checks pass. This may turn a situation of slowdown due to heavy workload into a full stop.",
+      "recommendation": "Improve load balancer/edge to have a more robust and controlled manner of throttling load"
+    },
+    {
+      "id": "7",
+      "level": "high",
+      "status": "Manifested",
+      "probability": "Likely",
+      "impact": "Severe",
+      "name": "Using Journaling False can cause outages under high system load",
+      "description": "Write concern journaling false may lower data durability during failovers. Journaling Ensures Data Durability Guarantees for Majority Write Concern are valid. Without jouraling we do not have a way to replay data between journal commit intervals ( defaul of 100MS ) . This means we can potentially loose data that was written in Memory but not written to on-disk journal before the commit interval of 100ms",
+      "recommendation": "Upgrade to >=6.0 ( were journaling cannot be disabled and ensure application use j:true option."
+    },
+    {
+      "id": "8",
+      "level": "medium",
+      "status": "Active",
+      "probability": "Likely",
+      "impact": "Severe",
+      "name": "Failure to implement log redaction can lead to the exposure of sensitive information when logs are shared, posing security and compliance risks.",
+      "description": "Log redaction is not configured. Slow queries are captured in mongod logs which logs the complete query sent from application. This can potentially threaten your data privacy if the slow query contains potential PII information. Also the need to redact the sensitive data manually before sharing logs can cause human errors.",
+      "recommendation": ""
+    },
+    {
+      "id": "9",
+      "level": "medium",
+      "status": "Active",
+      "probability": "Unlikely",
+      "impact": "Severe",
+      "name": "Risk of Data Loss During Full DC Failure",
+      "description": "With only 2 DC available there is no automatic failore in some scenario with a risk of data loss. Also, the way the upgrade is done (by stopping a DC) can lead to data loss.",
+      "recommendation": "3 DCs is the only way to mitigate this risk."
+    },
+    {
+      "id": "10",
+      "level": "medium",
+      "status": "Mitigated",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "Chained Replication potentially lead to slower data propagation and higher failure rates in multi datacenter environments.",
+      "description": "Enabled Chained Replication:\r\n - stale data chance increased. \r\n - Longer majority commit time resulting in cache pressure and increase latency.\r\n \r\n Disable Chained Replication:\r\n - May increases load on Primary and reduce resiliency under high load.",
+      "recommendation": ""
+    },
+    {
+      "id": "11",
+      "level": "medium",
+      "status": "Active",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "Unknown Metric Thresholds: Lack of defined metric thresholds and alerting systems limits early response to high load events or other incidents, prolonging recovery times.",
+      "description": "Lack of known thresholds and alerts when the workload increases may cause late response to incident.",
+      "recommendation": ""
+    },
+    {
+      "id": "12",
+      "level": "medium",
+      "status": "Mitigated",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "Lack of Reporting Database Information: The absence of up-to-date reporting database information hampers diagnostics and delays incident response.",
+      "description": "baseline data regarding the Transmit diagnostic database/cluster is not fully avaiable.",
+      "recommendation": "Gather full data set, analyze and incorporate into Service overview with any uncovered risks."
+    },
+    {
+      "id": "13",
+      "level": "medium",
+      "status": "Mitigated",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "Improper Upgrade Procedure (4.2 to 6.0): The upgrade procedure from MongoDB version 4.2 to 6.0 is not following best practices, which may result in errors or data inconsistency.",
+      "description": "Upgrading MongoDB from version 4.2 to version 6.0 without bake-in period is not following MongoDB best practice. One of the many disadvantage is that rolling back to version 4.2 is unsupported.",
+      "recommendation": ""
+    },
+    {
+      "id": "14",
+      "level": "medium",
+      "status": "Inactive",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "Disabled enableReadConcernMajority:False: Disabling enableReadConcernMajority may lead to issues with data consistency and future version compatibility.",
+      "description": "Disabling read concern majority is not available in version 6.0.15. In a scenario where write concern majority cannot be achieved this will create a bottleneck of read operations.",
+      "recommendation": ""
+    },
+    {
+      "id": "15",
+      "level": "medium",
+      "status": "Active",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "Lack of Incident Management Plan: The absence of a defined incident management plan and playbook slows down incident response and mitigation efforts.",
+      "description": "In order to ensure optimal Incident response a Joint Incident Management Plan and related playbooks should be available to both MongoDB and HSBC.",
+      "recommendation": "Develop JIMP and associated playbooks and make available to all parties."
+    },
+    {
+      "id": "16",
+      "level": "medium",
+      "status": "Potential",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "Unconfigured IPTables for Network Filtering: Lack of configured IPTables for network filtering exposes the system to potential security vulnerabilities and unauthorized access.",
+      "description": "It appears your Iptables have no configured rule and will apply the policy ACCEPT on each table, allowing all packets to pass through each table. It means that there is no firewall active (if this is your chosen firewall software). We recommend that you use a firewall as one of the network hardening mechanisms for hosts running MongoDB. We recommend you review our security checklist at https://docs.mongodb.com/manual/administration/security-checklist/ for our full list of security related recommendations.\r\n \r\n If you wish to enable Iptables, then see https://docs.mongodb.com/manual/tutorial/configure-linux-iptables-firewall for recommendations on configuring Iptables",
+      "recommendation": "Implement IP table rules to restrict Network traffic"
+    },
+    {
+      "id": "17",
+      "level": "medium",
+      "status": "Manifested",
+      "probability": "Likely",
+      "impact": "Minor",
+      "name": "The use of EOL MongoDB Version (4.2) limit performance improvements and features as well as complicating supportability.",
+      "description": "Even with extended support, multiple quality improvements and features were added to supported versions. Only major bug fixes will be deployed to 4.2. Multiple major version upgrades required to reach supported version.\r\n \r\n 17th October 2024:\r\n RHEL 7 to RHEL 8 in-place upgrades are not supported by CTO. RHEL 8 servers upgraded in-place may not be supported by CTO.\r\n Michael to get update from Stuart about what the challenges are.",
+      "recommendation": "Update to supported version of MongoDB, 6.0 + Recommended"
+    },
+    {
+      "id": "18",
+      "level": "medium",
+      "status": "Mitigated",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "Data and Reporting on Same Replica Set: Storing both application data and reporting data on the same replica set can lead to resource contention and performance issues.",
+      "description": "Application data for production application and reporting data (production metadata) are written to the same replica set potentially increasing the load during peak activity times.",
+      "recommendation": ""
+    },
+    {
+      "id": "19",
+      "level": "medium",
+      "status": "Active",
+      "probability": "Unlikely",
+      "impact": "Minor",
+      "name": "Guardium in ATAP Mode: Using Guardium in ATAP mode complicates diagnostics and incident resolution during high-load events, increasing recovery time.",
+      "description": "There is a history of known issue impacting resource utilization when using Guardium as it acts as \"man in the middle\" to replace certain commands to MongoDB.",
+      "recommendation": "MongoDB recommends using integrated mode instead of ATAP."
+    },
+    {
+      "id": "20",
+      "level": "medium",
+      "status": "Active",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "Clusters not managed by Ops Manager pose a risk of increased complexity in handling backups, restores, and upgrades, while also limiting available diagnostic information during incidents, potentially delaying issue resolution.",
+      "description": "No PIT restore, additional complexity in managing backup, longer restore time, complex restore. Without OM , we rely on custom jobs or scripts for taking backups and restoring a failed cluster. Which can be prone to errors in terms choosing correct Backups , performing the restores manually using commands and delay the eventual RTO",
+      "recommendation": ""
+    },
+    {
+      "id": "21",
+      "level": "medium",
+      "status": "Potential",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "Inability to download MongoDB-provided packages from the support portal or S3 bucket can delay deployments, updates, and issue resolution, impacting system availability and reliability.",
+      "description": "See https://hub.corp.mongodb.com/case/01375815 for problem description.",
+      "recommendation": ""
+    },
+    {
+      "id": "22",
+      "level": "medium",
+      "status": "Manifested",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "High Oplog Rate/ RTO not met: A high oplog rate can cause the backup restore process to exceed the Recovery Time Objective (RTO), affecting recovery times.",
+      "description": "Backup Restore time for all hosts reaches up to 24 hours which may exceed regulatory requirements. This is mostly due to the large size of the oplog.",
+      "recommendation": "Reduction of oplog size by optimizing single operation size (currently in work by transmit)"
+    },
+    {
+      "id": "23",
+      "level": "medium",
+      "status": "Active",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "No maxTimeMS in Queries: Omitting maxTimeMS in queries may allow runaway queries to consume excessive resources during high load, leading to system instability.",
+      "description": "Slow operations may create a bottleneck and contribute to cache pressure.\r\n Example - A new malformed query is introduced on Production which runs forever and does not timeout automatically could cause denial of service and block other legitimate queries from executing.",
+      "recommendation": ""
+    },
+    {
+      "id": "24",
+      "level": "low",
+      "status": "Potential",
+      "probability": "",
+      "impact": "",
+      "name": "The failure of the reports database aging script after upgrading to MongoDB 6.0 can result in outdated data accumulation, impacting database performance, storage efficiency, and reporting accuracy.",
+      "description": "The data size of the reports database might be growing more than anticipated.\r\n Reports database ageing script has broken after the upgrade to 6.0. The initial discussion on a call with HSBC seems referring at a driver compatibility issue.",
+      "recommendation": ""
+    },
+    {
+      "id": "25",
+      "level": "low",
+      "status": "Potential",
+      "probability": "",
+      "impact": "Minor",
+      "name": "Failure to Check Log File Rotation: Not checking log file rotation settings can lead to excessive log growth, causing disk space issues and affecting system performance.",
+      "description": "Based on the information in getMongoData there are no signs of log file rotation being implemented. Even if there is plenty of disk space, unchecked growth of log files is bad and might eventually lead to out-of-space on disk.",
+      "recommendation": "Implement log file rotation"
+    },
+    {
+      "id": "26",
+      "level": "low",
+      "status": "Active",
+      "probability": "Unlikely",
+      "impact": "Minor",
+      "name": "Non-Standard Replica Set Configuration: Deviations from standard replica set configurations can lead to unexpected issues and system instability.",
+      "description": "Settings in rs configuration appear to be tuned to non default settings, including settings which are depricated in later version of mongodb.\r\n Default write concern is set to 1. The parameter is not supported in version 6.0.",
+      "recommendation": "Investigate each of the tuned parameters and determine if needed."
+    },
+    {
+      "id": "27",
+      "level": "low",
+      "status": "Active",
+      "probability": "Unlikely",
+      "impact": "Minor",
+      "name": "Disabling retryable writes may lead to write operation failures during failovers, as the client cannot automatically retry and complete interrupted write operations.",
+      "description": "When retryable writes are disabled, operations are more likely to fail during failovers (manual or automated)",
+      "recommendation": ""
+    },
+    {
+      "id": "28",
+      "level": "low",
+      "status": "Manifested",
+      "probability": "Unlikely",
+      "impact": "Minor",
+      "name": "Manual Upgrade Process: Bypassing firewalls during manual upgrade processes can introduce errors or security risks, hindering a smooth upgrade experience.",
+      "description": "\"In some WSIT environments , Upgrades using OM was done component wise rather than cluster wide upgrade.\r\n This introduced the challenge and dependency on manual efforts to perform upgrades in the correct order and for all components ( Mongos , Config server , Shards etc. ) . \"",
+      "recommendation": ""
+    },
+    {
+      "id": "29",
+      "level": "low",
+      "status": "Active",
+      "probability": "Possible",
+      "impact": "Minor",
+      "name": "Unknown Archival Process: An unknown data archival process can lead to unexpected load spikes, affecting system performance during peak periods.",
+      "description": "Unidirectional Growth in Data can cause Cluster performance degradation and Archiving may be necessary to maintain performance levels. Same queries can progressively become slower if run on an increased data size. Movement of data from Disk to Cache can allow become costly with higher size of working set.",
+      "recommendation": ""
+    },
+    {
+      "id": "30",
+      "level": "low",
+      "status": "Active",
+      "probability": "Unlikely",
+      "impact": "Moderate",
+      "name": "Virtual Machine Ballooning: Virtual machine ballooning can degrade performance by restricting memory resources during high load events.",
+      "description": "MongoDB is known to run poorly with a variety of balloon drivers such as VMWare's (vmmemctl), you must map and reserve the full amount of memory for the virtual machine running MongoDB.",
+      "recommendation": "If the memory reservation feature is not available for your ballon driver/virtual machine, then please review the specific documentation for your virtualisation software to determine how to disable ballooning. Please see our production notes (if you are using VMWare, please see our specific VMWare production notes) for further information and recommendations."
+    },
+    {
+      "id": "31",
+      "level": "low",
+      "status": "Manifested",
+      "probability": "Likely",
+      "impact": "Minor",
+      "name": "Short FTDC Retention: Short retention of Full Time Diagnostic Capture (FTDC) data limits the ability to analyze historical system performance during incidents.",
+      "description": "During Support case 01320969 investigation we had a clear problem in getting older FTDC logs from HSBC because they were aged out. We should have a strategy to collect and retain the FTDC and MongoDB logs for a longer period, store them somewhere maybe S3 bucket, so that when required we have them available",
+      "recommendation": "Extend storage/retention of FTDC to full 500MB"
+    },
+    {
+      "id": "32",
+      "level": "low",
+      "status": "Active",
+      "probability": "Possible",
+      "impact": "Minor",
+      "name": "Performance Degradation in MongoDB 6.0: MongoDB version 6.0 may experience performance degradation during aggregation operations, particularly with larger datasets.",
+      "description": "In MongoDB version 6.0 it has been identified a performance regression for large aggregation pipeline as described in SERVER-91570 if the new query engine (SBE) is used. MongoDB recommend using the old query engine and to disable SBE by either upgrading to version 6.0.18 which disable SBE by default or by manually setting internalQueryForceClassicEngine to true.",
+      "recommendation": ""
+    },
+    {
+      "id": "33",
+      "level": "low",
+      "status": "Inactive",
+      "probability": "Likely",
+      "impact": "Minor",
+      "name": "Non-Majority Write Concern: Not using write concern majority can lead to data inconsistencies and unexpected side effects during high load events.",
+      "description": "As identified in the isolation tests, the current deployment architecture implies that majority write will always write to the other data centre. From a data persistence perspective it is good. However, from a performance perspective it also slows down the write requests, and potentially problematic if the latency between the 2 data centres is long.\r\n There can be several options for this problem depending on your requirements:\r\n If writing to the other data centre is necessary, keep the current setting. \r\n If writing to the other data centre is not necessary, the hidden node should be moved to the other data centre, and change the current hidden node to a normal electable node. So the majority write can be met in 1 data centre.\r\n If data doesn’t need to be persisted, you can use write concern 2 or 1, and flow control needs to be disabled. 2 provides better persistence but doesn’t guarantee 100% persistence.",
+      "recommendation": ""
+    },
+    {
+      "id": "34",
+      "level": "low",
+      "status": "Active",
+      "probability": "Unlikely",
+      "impact": "Moderate",
+      "name": "Lack of Automatic Failover for DC Loss: The absence of automatic failover for a data center (DC) loss can significantly prolong recovery times during an outage.",
+      "description": "In the current setup there is a risk during DC1 or DC2 down scenarios as we will have an even number (4) of voting members. Can result in no Primary being elected unless nodes have different priorities defined.",
+      "recommendation": "Implement a three data center topology"
+    },
+    {
+      "id": "35",
+      "level": "low",
+      "status": "Active",
+      "probability": "Likely",
+      "impact": "Minor",
+      "name": "Sharded Cluster Data Imbalance: Imbalance in sharded cluster data can lead to inefficient resource utilization and performance issues.",
+      "description": "Some Clusters are Sharded but Collection data is not balanced. Collections may not be properly balanced due to many reasons. This Risk would look at if the unbalanced collection is due to a System fault or by design and negate / confirm if it's a risk at all.",
+      "recommendation": ""
+    },
+    {
+      "id": "36",
+      "level": "low",
+      "status": "Inactive",
+      "probability": "",
+      "impact": "",
+      "name": "Improper implementation of connection pooling in MongoDB can lead to resource exhaustion, performance degradation, deadlocks, security vulnerabilities, scalability issues, and operational challenges, ultimately affecting system reliability and efficiency.",
+      "description": "Improper implementation of connection pooling in MongoDB can lead to several risks and performance issues.",
+      "recommendation": ""
+    },
+    {
+      "id": "37",
+      "level": "low",
+      "status": "Potential",
+      "probability": "Unlikely",
+      "impact": "Moderate",
+      "name": "Low Max File Descriptor: A low maximum file descriptor setting can cause stability issues under high load, potentially leading to service interruptions.",
+      "description": "From available mdiag. Max file descriptors is set to 1024 which is potentially too low for MongoDB",
+      "recommendation": ""
+    },
+    {
+      "id": "38",
+      "level": "low",
+      "status": "Potential",
+      "probability": "Possible",
+      "impact": "Minor",
+      "name": "Low Kernel Max Map Count: A low kernel max map count can impact system stability and performance during memory-intensive operations.",
+      "description": "The recommended sysctl value for \"vm.max_map_count\" is >= 128000.",
+      "recommendation": ""
+    },
+    {
+      "id": "39",
+      "level": "low",
+      "status": "Active",
+      "probability": "Unlikely",
+      "impact": "Minor",
+      "name": "[OS/VM] Improper mdiag Swappiness: Incorrect swappiness settings can lead to inefficient memory management, negatively impacting system performance.",
+      "description": "Swappiness is a Linux kernel setting that influences the behavior of the Virtual Memory manager when it needs to evict pages, ranging from 0-100. Higher values increase the priority of evicting anonymous pages to swap as opposed to pages from the page cache.\r\n With kernel version 3.5 and over, as well as kernel version 2.6.32-303 and over, a value of 0 may disable swap completely. Higher values are not recommended for database server loads.\r\n A value of 1 permits the kernel to swap only to avoid out-of-memory problems.\r\n If swap rate is believed to be affecting performance, this parameter can be set to a lower value than the default. Any changes to this parameter should be tested in your staging / testing environments with a representative workload to ensure it is beneficial to the performance of your MongoDB deployment.",
+      "recommendation": "With kernel version 3.5 and over, as well as kernel version 2.6.32-303 and over, a value of 0 may disable swap completely. Higher values are not recommended for database server loads. A value of 1 permits the kernel to swap only to avoid out-of-memory problems. If swap rate is believed to be affecting performance, this parameter can be set to a lower value than the default. Any changes to this parameter should be tested in your staging / testing environments with a representative workload to ensure it is beneficial to the performance of your MongoDB deployment."
+    },
+    {
+      "id": "40",
+      "level": "low",
+      "status": "Manifested",
+      "probability": "Possible",
+      "impact": "Moderate",
+      "name": "[OS/VM] A high TCP KeepAlive timeout value can delay the detection of broken connections, leading to prolonged resource consumption and potential disruption in failover or recovery scenarios.",
+      "description": "Identified High Value of tcpKeepAlive timeout of 300 seconds from Mdiag. This can pose a risk when there is no other Time out value supplied with read and write ops. Queries that times out due to Host level timeout can cause queue to build up on MongoDB and slowdown incoming operations. Recommended timeout is 120 Seconds.",
+      "recommendation": ""
+    },
+    {
+      "id": "41",
+      "level": "low",
+      "status": "Manifested",
+      "probability": "Unlikely",
+      "impact": "Moderate",
+      "name": "Increased Resource Utilization with findAndModify Ops: Using findAndModify operations increases resource utilization and can amplify load during high-demand periods.",
+      "description": "findAndModify utilizes more system resources than an update operation, and takes longer to complete replication per operation. In some cases , using findAndModify is neccessary where we need to have the pre and post versions of the document. If there is no requirement though , we should try to use alternatives like db.collection.update() .\r\n \r\n SERVER-56372 backports the parameter to 4.4",
+      "recommendation": ""
+    },
+    {
+      "id": "42",
+      "level": "high",
+      "status": "Active",
+      "probability": "Possible",
+      "impact": "Severe",
+      "name": "No EAR (Encryption At Rest) enabled may lead to unauthorised data access",
+      "description": "Encryption at rest is not enabled on HSBC WPB Services. While the on-prem services are at lower risk with the disks being hosted and managed by HSBC teams, cloud services use network attacked EBS volume.",
+      "recommendation": ""
+    },
+    {
+      "id": "43",
+      "level": "low",
+      "status": "Active",
+      "probability": "Unlikely",
+      "impact": "Minor",
+      "name": "Unnecessary Indexes: Unnecessary indexes on auth-control-reports.reports can consume excessive resources, negatively impacting performance.",
+      "description": "On NS auth-control-reports.reports there are 2 indexes {\"user_id\":1,\"time_lo_res\":1} and {\"user_id\":1}. It should be evaluated which one should be removed. Example - A query on fields \"user_id\" and \"time_lo_res\" might use the redundant index {\"user_id\":1} due to a Bug / Limitation in Query planner causing the execution to be sub-optimal. We can Mitigate this risk of sub-optimal query execution by removing the redundant index.",
+      "recommendation": ""
+    },
+    {
+      "id": "44",
+      "level": "low",
+      "status": "Active",
+      "probability": "Possible",
+      "impact": "Minor",
+      "name": "[OS/VM] High Disk Readahead: Detection of high disk readahead can indicate inefficient disk access patterns, leading to performance degradation.",
+      "description": "The recommended disk readahead for block devices with MongoDB MMAPv1 data files is 32 blocks (16kb). For WiredTiger data files it is between 8 and 32 blocks.\r\n \r\n The best readahead setting depends on your schema design, data access patterns, and on your actual hardware. You can determine the best readahead setting for the specific application by testing and measuring your environment using a typical load.\r\n \r\n See http://docs.mongodb.org/manual/administration/production-notes/#recommended-configuration for more details.\r\n \r\n You will need to restart your mongod process(es) if you change your read ahead settings to take allow the new settings to take effect.",
+      "recommendation": "Evaluate and set correct readahead for system - https://docs.google.com/document/d/1cCbboc7JgvPDE1ssRe70nEXSkoHCfelU4FhewVD4v0w/edit?tab=t.0"
+    },
+    {
+      "id": "45",
+      "level": "low",
+      "status": "Inactive",
+      "probability": "Possible",
+      "impact": "Minor",
+      "name": "[OS/VM] Transparent Hugepages Defrag: Transparent Hugepages defragmentation can cause memory inefficiencies, reducing system performance.",
+      "description": "Transparent Hugepages (THP) is known to perform poorly under database workloads, which tend to have sparse rather than contiguous memory access patterns. THPs are intended to reduce the overhead of managing multiple pages of memory by dealing with memory in larger individual chunks. This strategy works well for workloads that deal with very large files, (such as streaming video and media files), but has a detrimental effect on the type of workloads MongoDB generates. MongoDB deals with a lot of small documents and induces a lot of random IO.",
+      "recommendation": "You should disable THP Defrag (as well as THP) on Linux machines used to run MongoDB instances to ensure best performance. Please see http://docs.mongodb.org/manual/tutorial/transparent-huge-pages for further information and recommendations."
+    },
+    {
+      "id": "46",
+      "level": "low",
+      "status": "Manifested",
+      "probability": "",
+      "impact": "",
+      "name": "Improper configuration of getLastErrorDefaults can lead to inconsistencies during Project Migration, affecting the reliability of the Project data.",
+      "description": "Adding this risk as it was identified in case 01403185. This risk need to be assessed if it is a risk for this service and other services. RS reconfig was needed to solve this.",
+      "recommendation": ""
+    },
+    {
+      "id": "47",
+      "level": "low",
+      "status": "Manifested",
+      "probability": "Unlikely",
+      "impact": "Severe",
+      "name": "Low Disk Space for MongoDB Logs: Low disk space for MongoDB logs can result in system instability or log loss, complicating troubleshooting and performance monitoring.",
+      "description": "The standard partition size for the log partition is only 10GB. Errors in logging verbosity, and/or surges of slow operations during load spikes, combined with less aggressive log rotation policies can fill up this partition causing the node to fail.",
+      "recommendation": ""
+    },
+    {
+      "id": "48",
+      "level": "low",
+      "status": "Active",
+      "probability": "Unlikely",
+      "impact": "Minor",
+      "name": "Incompatible Java Driver (3.10.2): Using an incompatible Java driver version (3.10.2) can lead to operation or connection failures, affecting system stability.",
+      "description": "Older versions of drivers running with newer mongodb versions can cause problems for compatibility and also the newer improved features of the upgraded drivers. E.g. - A new driver version might have improved error handling during Elections but the older versions may not handle the errors automatically.",
+      "recommendation": ""
+    },
+    {
+      "id": "49",
+      "level": "low",
+      "status": "Active",
+      "probability": "Possible",
+      "impact": "Minor",
+      "name": "Inaccurate Test Environment Simulation: Testing hardware not accurately simulating production environments can lead to misleading results and unpreparedness for real-world scenarios.",
+      "description": "Performance is tested via Jmeter scripts on QA environment with similar configuration but lower hardware than prod environment. This means we do not have an accurate estimate on the prod environment limits and thresholds to look for.\r\n Looks like performance tests are using what is essentially a CI environment.\r\n Testing: Cannot evaluate system performance under estimated workloads due to the testing environment being designed only for functional testing and is not an accurate representation of the prod environment.",
+      "recommendation": "Check which process is consuming memory other than mongod"
+    },
+    {
+      "id": "50",
+      "level": "low",
+      "status": "Active",
+      "probability": "Possible",
+      "impact": "Minor",
+      "name": "Nodes priority configuration may lead to unnecessary elections with primary node switching accros Data Centers",
+      "description": "As per Health checks from Q1 2025 - Node priority is configured with different priority for each node - meaning if the primary node fails over we are guarantees to have at least 2 election to return to highest priority after the node is recovered. For ASP second highest priority node is not in the same data center as current primary.",
+      "recommendation": ""
+    },
+    {
+      "id": "51",
+      "level": "low",
+      "status": "Potential",
+      "probability": "Possible",
+      "impact": "Severe",
+      "name": "Storage Capacity may be insufficient for the current data growth rate over the next 6 months.",
+      "description": "current storage size is 70% of total storage. (1.25TB out of 1.8TB). Current data growth projection risk storage exhaustion over 6 months.",
+      "recommendation": ""
+    },
+    {
+      "id": "52",
+      "level": "low",
+      "status": "Potential",
+      "probability": "Unlikely",
+      "impact": "Moderate",
+      "name": "WPB Cloud Services use Amazon Linux 2 - Based of RHEL 7 - Which may not be supported for MongoDB v7 and later.",
+      "description": "WPB Cloud Services use Linux version \"Amazon Linux release 2 (Karoo)\" which is based on Red Hat 7.3.1-17. This OS may be not supported by MongoDB v7 and newer as per https://www.mongodb.com/docs/manual/release-notes/7.0/#removed-platforms",
+      "recommendation": ""
+    },
+    {
+      "id": "53",
+      "level": "medium",
+      "status": "Manifested",
+      "probability": "Likely",
+      "impact": "Moderate",
+      "name": "FTDC data corrupted on Download from Ops Manager",
+      "description": "FTDC data might be corrupted while downloading due to a known issue in Ops Manager.",
+      "recommendation": ""
+    },
+    {
+      "id": "54",
+      "level": "medium",
+      "status": "Potential",
+      "probability": "Likely",
+      "impact": "Moderate",
+      "name": "High Value of minSnapshotHistoryWindowInSeconds may cause write performance degradation",
+      "description": "A high value of the server parameter minSnapshotHistoryWindowInSeconds has been known to cause performance issues on MongoDB versions 5.0 or higher . A general recommendation is to set the value to 5 seconds on Data bearing Nodes for optimum performance.",
+      "recommendation": ""
+    },
+    {
+      "id": "55",
+      "level": "medium",
+      "status": "Potential",
+      "probability": "Likely",
+      "impact": "Moderate",
+      "name": "MongoDB Version 8.0 requires THP enabled for optimum Performance",
+      "description": "As HSBC prepares to Upgrade to version 8.0 , THP needs to be enabled for using the newest Google TcmAllocator - https://www.mongodb.com/docs/manual/administration/tcmalloc-performance/",
+      "recommendation": ""
+    },
+    {
+      "id": "56",
+      "level": "high",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "Version 5.0.32 in use",
+      "description": "Using an older version like 5.0.32 may expose the system to known bugs, security vulnerabilities, and lack of support for newer features.",
+      "recommendation": ""
+    },
+    {
+      "id": "57",
+      "level": "high",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "writeConcern majority is not in use.",
+      "description": "Not using writeConcern majority can lead to data loss during failovers or primary elections, as writes may not be durably committed.",
+      "recommendation": ""
+    },
+    {
+      "id": "58",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "StreamEQ.Blotter.Latest collection has 42 indexes",
+      "description": "Having 42 indexes on a single collection can significantly degrade write performance and increase memory usage.",
+      "recommendation": ""
+    },
+    {
+      "id": "59",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "almost 3TB compressed data, 15TB uncompressed, version 5.0.32, 4 nodes + 1 arbiter",
+      "description": "Managing a large dataset on an older version with a 4+1 architecture may lead to operational challenges and long recovery times.",
+      "recommendation": ""
+    },
+    {
+      "id": "60",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "RTO Not tested",
+      "description": "Without testing the RTO, there is no guarantee that the system can be restored within acceptable business timeframes during a disaster.",
+      "recommendation": ""
+    },
+    {
+      "id": "61",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "No Data archival Process",
+      "description": "The absence of a data archival process leads to unbounded data growth, increasing storage costs and potentially degrading performance.",
+      "recommendation": ""
+    },
+    {
+      "id": "62",
+      "level": "high",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "Allowed TLS and not enforced",
+      "description": "Allowing but not enforcing TLS leaves the system vulnerable to unencrypted connections, potentially exposing sensitive data in transit.",
+      "recommendation": ""
+    },
+    {
+      "id": "63",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "No Audit log",
+      "description": "The lack of an audit log makes it difficult to track unauthorized access, changes to data, or investigate security incidents.",
+      "recommendation": ""
+    },
+    {
+      "id": "64",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "No encryption at rest",
+      "description": "Without encryption at rest, physical access to the storage media could result in a data breach, compromising sensitive information.",
+      "recommendation": ""
+    },
+    {
+      "id": "65",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "ss wt cache fill ratio above 94%",
+      "description": "A WiredTiger cache fill ratio above 94% indicates high memory pressure, which can lead to severe performance degradation.",
+      "recommendation": ""
+    },
+    {
+      "id": "66",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "HSBC expresses the desired to move to a simpler, smaller and manageable data model",
+      "description": "The current complex data model may be causing performance issues and maintenance overhead, necessitating a redesign.",
+      "recommendation": ""
+    },
+    {
+      "id": "67",
+      "level": "high",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "Test environment does not mimic the PROD environment.",
+      "description": "A test environment that differs from production limits the ability to accurately reproduce issues and safely test deployments.",
+      "recommendation": ""
+    },
+    {
+      "id": "68",
+      "level": "low",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "4+1 nodes patterns not aligned with the CTO 6 nodes patterns.",
+      "description": "Devating from the standard CTO 6-node pattern may lead to inconsistencies in support, deployment, and high availability guarantees.",
+      "recommendation": ""
+    },
+    {
+      "id": "69",
+      "level": "low",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "Typo in disableProtocol",
+      "description": "It appears the team made a typo in disabledProtocols, where TLS1_0 is listed twice instead of specifying TLS1_1. Since TLS 1.0 and TLS 1.1 are legacy protocols, MongoDB recommends disabling both wherever TLS 1.2+ is available.",
+      "recommendation": ""
+    },
+    {
+      "id": "70",
+      "level": "low",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "PSA architecture used",
+      "description": "In a Primary-Secondary-Arbiter (PSA) architecture, if the data-bearing secondary node goes down, the primary retains data in cache waiting for the secondary to acknowledge. This can lead to severe memory pressure, performance degradation, and reduced data redundancy compared to a 3-node replica set. The HSBC CTO team recommend using a different pattern.",
+      "recommendation": ""
+    },
+    {
+      "id": "71",
+      "level": "high",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "preferTLS",
+      "description": "preferTLS is enabled instead of requireTLS, allowing both TLS and non-TLS inbound connections and weakening transport security.",
+      "recommendation": ""
+    },
+    {
+      "id": "72",
+      "level": "low",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "BI Connector",
+      "description": "The deployment uses the BI Connector, which will be deprecated in September 2026.",
+      "recommendation": ""
+    },
+    {
+      "id": "73",
+      "level": "high",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "RTO Not tested on 8.2TB uncompressed replica set",
+      "description": "The documented RTO is 4 hours but has never been validated. Additionally, the deployment runs an 8.2 TB uncompressed replica set, which may impact backup and restore times. evaluating a sharded architecture is recommended.",
+      "recommendation": ""
+    },
+    {
+      "id": "74",
+      "level": "high",
+      "status": "",
+      "probability": "",
+      "impact": "Severe",
+      "name": "PSSSA replica set in 2 DC",
+      "description": "The deployment uses the PSSSA architecture with a write concern of majority, which can result in service unavailability if one data center becomes unavailable.",
+      "recommendation": ""
+    },
+    {
+      "id": "75",
+      "level": "low",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "Redundant indexes",
+      "description": "There are some redundant indexes evaluated here",
+      "recommendation": ""
+    },
+    {
+      "id": "76",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "EOL Version of MongoDB",
+      "description": "Using EOL version 6.0.27",
+      "recommendation": ""
+    },
+    {
+      "id": "77",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "Using outdated driver",
+      "description": "Using outdated driver: mongo-java-driver|legacy 3.12.10 (4.7 needed)",
+      "recommendation": ""
+    },
+    {
+      "id": "78",
+      "level": "medium",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "IP Address in the DNS Name field on your certificate",
+      "description": "IP Address in the DNS Name field on your certificate. This formulation is deprecated.",
+      "recommendation": ""
+    },
+    {
+      "id": "79",
+      "level": "low",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "Client connecting with server's own TLS certificate",
+      "description": "Client connecting with server's own TLS certificate",
+      "recommendation": ""
+    },
+    {
+      "id": "80",
+      "level": "low",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "Missing indexes",
+      "description": "Collection lacks necessary indexes and is running COLLSCAN to find documents.",
+      "recommendation": ""
+    },
+    {
+      "id": "81",
+      "level": "low",
+      "status": "",
+      "probability": "",
+      "impact": "Moderate",
+      "name": "Deprecated command",
+      "description": "Client is running deprecated command. Future version of MongoDB may not support this command anymore.",
+      "recommendation": ""
+    }
+  ]
+}

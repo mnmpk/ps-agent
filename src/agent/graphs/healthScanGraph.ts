@@ -9,13 +9,14 @@ import {
   runChecks,
   scoreFindings,
 } from "../../checks/index.js";
-import { SEVERITY_RANK, type ScanResult } from "../../core/types.js";
+import { SEVERITY_RANK, type ScanResult, type CollectedFacts as CollectedFactsType } from "../../core/types.js";
 import type { Source } from "../../core/source.js";
 import { createChatModelFromEnv, llmConfigFromEnv } from "../llm.js";
 import { correlateAndRank, fallbackAnalysis } from "../correlate.js";
 import type { ScanStore } from "../../store/store.js";
 import { DEFAULT_THRESHOLDS, type Thresholds } from "../../checks/index.js";
 import { bus } from "../../events/bus.js";
+import { riskRegisterFindings } from "../../risks/findings.js";
 
 /** Merge a source's partial threshold overrides onto the defaults. */
 export function resolveThresholds(source: Source): Thresholds {
@@ -33,6 +34,10 @@ function collectorFor(source: Source): Collector {
       return new McpCollector(source);
     case "opsmanager":
       return new OpsManagerCollector(source);
+    case "offline":
+      throw new Error(
+        "Offline sources are updated by importing a getMongoData log, not by scanning.",
+      );
   }
 }
 
@@ -56,9 +61,10 @@ function runRuleEngine(
   state: HealthScanStateType,
 ): Partial<HealthScanStateType> {
   if (!state.facts) throw new Error("runRuleEngine called before facts were collected");
-  const findings = runChecks({ facts: state.facts, thresholds: state.thresholds }).sort(
-    (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity],
-  );
+  const findings = [
+    ...runChecks({ facts: state.facts, thresholds: state.thresholds }),
+    ...riskRegisterFindings(state.facts), // detected expert-register risks
+  ].sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
   const score = scoreFindings(findings);
   return { findings, score };
 }
@@ -117,6 +123,32 @@ export function buildHealthScanGraph() {
     .addEdge("run_rule_engine", "correlate_and_rank")
     .addEdge("correlate_and_rank", END);
   return graph.compile();
+}
+
+/**
+ * Build a ScanResult from already-collected facts (no live collection). Used by
+ * the offline importer — runs the deterministic rule engine + score on facts
+ * parsed from a getMongoData log.
+ */
+export function scoreFactsToScan(
+  source: Source,
+  facts: CollectedFactsType,
+): ScanResult {
+  const now = new Date();
+  const findings = [
+    ...runChecks({ facts, thresholds: resolveThresholds(source) }),
+    ...riskRegisterFindings(facts),
+  ].sort((a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity]);
+  const score = scoreFindings(findings);
+  return {
+    sourceId: source.id,
+    sourceName: source.name,
+    startedAt: now,
+    finishedAt: now,
+    facts,
+    findings,
+    score,
+  };
 }
 
 export interface RunGraphScanOptions {

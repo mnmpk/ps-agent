@@ -3,3 +3,5 @@ dist/
 *.log
 .env
 .DS_Store
+# Source risk register spreadsheet (the generated src/risks/risks-catalog.json is committed instead)
+*.xlsx

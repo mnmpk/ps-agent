@@ -109,6 +109,55 @@ export interface IndexUsage {
   keys: Record<string, 1 | -1 | string>;
 }
 
+/**
+ * OS/kernel tuning facts from an mdiag.sh export (Linux). These are the settings
+ * getMongoData can't see; they drive the OS-level risk-register checks.
+ */
+export interface OsFacts {
+  /** vm.swappiness */
+  swappiness?: number;
+  /** vm.max_map_count */
+  maxMapCount?: number;
+  /** net.ipv4.tcp_keepalive_time (seconds) */
+  tcpKeepaliveTime?: number;
+  /** net.core.somaxconn */
+  somaxconn?: number;
+  /** Transparent HugePages enabled setting (e.g. "always", "never", "madvise"). */
+  transparentHugePages?: string;
+  /** Transparent HugePages defrag setting. */
+  thpDefrag?: string;
+  /** Max disk read_ahead_kb seen across devices. */
+  readAheadKb?: number;
+  /** Soft/open file-descriptor limit (ulimit -n). */
+  openFilesLimit?: number;
+  /** Max processes limit (ulimit -u). */
+  maxProcessesLimit?: number;
+  /** SELinux status (e.g. "enforcing", "permissive", "disabled"). */
+  selinux?: string;
+  /** NUMA present/enabled (from numactl). */
+  numa?: boolean;
+  /** Disk I/O scheduler(s) seen. */
+  ioScheduler?: string;
+  /** mdiag reference/ticket + version, for provenance. */
+  mdiagVersion?: string;
+  mdiagRef?: string;
+  /** Hostname the mdiag was collected on (for grouping node-level imports). */
+  hostname?: string;
+  /** Non-fatal parse notes. */
+  warnings?: string[];
+}
+
+/** Host hardware facts (from db.hostInfo()); the limits for offline/direct capacity. */
+export interface HostInfo {
+  hostname?: string;
+  cpuCores?: number;
+  memSizeMB?: number;
+  os?: string;
+  numaEnabled?: boolean;
+  /** hostInfo.extra (Linux: readahead etc.; otherwise misc). */
+  extra?: Record<string, unknown>;
+}
+
 export interface Topology {
   type: "standalone" | "replicaSet" | "sharded";
   mongoVersion: string;
@@ -242,8 +291,14 @@ export interface CollectedFacts {
   atlas?: AtlasFacts;
   /** Data-layer storage facts (MCP or driver). */
   storage?: StorageFacts;
+  /** Host hardware (RAM/cores) — from hostInfo (offline / enhanced direct). */
+  hostInfo?: HostInfo;
+  /** Selected server parameters (getParameter '*') for config-risk evaluation. */
+  serverParameters?: Record<string, unknown>;
+  /** OS/kernel tuning facts from an imported mdiag.sh export (Linux). */
+  os?: OsFacts;
   /** How facts were gathered (for UI + transparency). */
-  collectionMethod?: "direct" | "atlas" | "mcp" | "mcp+direct";
+  collectionMethod?: "direct" | "atlas" | "mcp" | "mcp+direct" | "offline";
   /** Non-fatal collection problems (e.g. missing privilege for a command). */
   warnings: string[];
 }

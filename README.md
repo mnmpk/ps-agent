@@ -74,6 +74,177 @@ OM sources get the same metrics/history/capacity/bottleneck analysis as Atlas.
 Self-managed hosts have no cluster tier, so utilization is shown without
 hardware limits (growth, days-until-full, and slow-query bottlenecks still work).
 
+## Risk register
+
+ps-agent ships an **expert MongoDB risk register** (81 risks with level /
+probability / impact / recommendation) and assesses each cluster against it:
+
+- **Deterministic evaluators** check auto-detectable risks against the scan facts
+  (EOL version, unused indexes, storage capacity, encryption-at-rest, oplog
+  window, TLS-not-enforced, log redaction, majority read concern, NUMA, file
+  descriptors, THP, …) → *detected* / *clear* / *unknown* with evidence.
+  Detected risks also appear in the main **findings / risk inbox** as
+  `register.<id>` (level→severity).
+- An **LLM-assisted matcher** cross-references the remaining risks against the
+  facts → advisory *suggested* matches (evidence-required, conservative; skips
+  org/process risks), shown in the Risk Register view.
+- The rest are flagged for **manual review**.
+
+View it in the dashboard (cluster detail → **Risk register**) or via
+`GET /api/sources/:id/risks`. Works for any scanned source, including **offline**
+getMongoData imports.
+
+### Managing the catalog
+
+The committed `src/risks/risks-catalog.json` is the **seed**. At runtime the
+catalog is mutable and persisted (file `~/.ps-agent/risk-catalog.json`, or the
+`risk_catalog` collection when a Mongo store is configured), seeded from the JSON
+on first use. Manage it in the dashboard **Risk catalog** tab — enable/disable
+per risk (disabled risks are **skipped**: no assessment, no finding), add / edit /
+delete, and import / export — or via the API:
+
+```bash
+curl http://127.0.0.1:4000/api/catalog                      # list
+curl -X POST http://127.0.0.1:4000/api/catalog \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Custom risk","level":"high","recommendation":"…"}'
+curl -X PATCH http://127.0.0.1:4000/api/catalog/<id> \
+  -H 'Content-Type: application/json' -d '{"enabled":false}'   # disable
+curl -X DELETE http://127.0.0.1:4000/api/catalog/<id>
+curl http://127.0.0.1:4000/api/catalog/export > risks-catalog.json
+curl -X POST "http://127.0.0.1:4000/api/catalog/import?mode=merge" \
+  --data-binary @risks-catalog.json        # mode=merge (upsert) | replace
+```
+
+To (re)generate the seed from the spreadsheet (the `.xlsx` is gitignored), then
+import it:
+
+```bash
+npm run risks:convert "risk register.xlsx"
+```
+
+## Offline mode (isolated clusters)
+
+Most production clusters are network-isolated, so the agent can't connect. Collect
+read-only diagnostics on the nodes and import them — no connection needed. There
+are three kinds (all optional, mix as you have them):
+
+- **getMongoData.js** — cluster-level config/status/indexes/storage (one file).
+- **mdiag.sh** — node-level OS/kernel tunings (one file per node).
+- **FTDC** — node-level `diagnostic.data/metrics.*` for capacity trends (many files).
+
+### Easiest: import everything at once (auto-detected)
+
+Put whatever you collected into one folder (any mix, any number of nodes) and
+import it in a single step — the agent detects each file's type and merges it all
+into one deployment:
+
+```bash
+ps-agent import --dir ./diagnostics --name prod-cluster
+#   or: dashboard → Add deployment → "Offline (import diagnostics)" → pick files
+#       or a whole folder (there's a "select a whole folder" checkbox)
+#   or: curl -X POST "http://127.0.0.1:4000/api/sources/import?name=prod" \
+#          -F files=@getMongoData.log -F files=@mdiag-n1.json \
+#          -F files=@n1/diagnostic.data/metrics.2024-03-08T22-58-41Z-00000
+```
+
+On an existing deployment, use **"Import diagnostics…"** in the cluster detail view
+(or `POST /api/sources/:id/import`) to attach more files later. The individual
+commands below still work if you prefer to import one type at a time.
+
+Node identity is reconciled across the three sources — getMongoData member names
+(`host:port`), FTDC hostnames, and mdiag bare hostnames are matched to the replica
+set's member list, so each physical node is counted once (not 2–3 times).
+
+### getMongoData (one type at a time)
+
+```bash
+# 1) On the isolated node:
+mongosh HOST:PORT/admin -u <user> -p <pass> getMongoData.js > getMongoData.log
+
+# 2) Bring the log to the agent, then import it:
+ps-agent import --file getMongoData.log --name prod-cluster
+#   or: curl -X POST "http://127.0.0.1:4000/api/sources/offline/import?name=prod" --data-binary @getMongoData.log
+```
+
+The import parses the export into facts and produces a full health/config/index/
+storage report (`collectionMethod: offline`), with hardware limits from the
+export's `hostInfo` (RAM/cores). It's a point-in-time snapshot — re-import a newer
+log to update. (For growth/utilization **trends** offline, attach FTDC — below.)
+
+### FTDC (offline capacity metrics)
+
+getMongoData is a single snapshot, so it can't show CPU/memory/disk **trends**.
+MongoDB continuously records those in **FTDC** (Full-Time Diagnostic Data Capture)
+— binary files under each node's `diagnostic.data/` directory. Ship those files to
+the agent to get real time-series for capacity analysis, with no connection:
+
+```bash
+# On the node, the files live in the dbPath (or systemLog dir):
+#   <dbPath>/diagnostic.data/metrics.*        (archive files)
+# Keep those files where they are and point the agent at the directory:
+
+# Attach FTDC to an existing deployment (recommended: import getMongoData first):
+ps-agent import --ftdc --file /path/to/diagnostic.data --source <sourceId>
+#   single file also works:  --file /path/to/metrics.2024-03-08T22-58-41Z-00000
+#   multiple nodes at once:  --file /node1/diagnostic.data,/node2/diagnostic.data
+#   or standalone:           ps-agent import --ftdc --file diagnostic.data --name prod
+#   or:  curl -X POST http://127.0.0.1:4000/api/sources/<id>/ftdc/import \
+#          -H 'Content-Type: application/octet-stream' --data-binary @metrics.<ts>
+#   or:  dashboard → open the cluster → "Attach FTDC" → upload a metrics.* file
+```
+
+**The raw FTDC files stay on disk — the agent does not copy them into its store.**
+Raw FTDC is large (thousands of metrics at 1 sample/sec per node → GBs). The CLI
+streams the files **one at a time** (bounded memory, even for a multi-GB, multi-node
+import), decodes them, extracts a curated capacity set, and **downsamples each series
+to hourly buckets** before storing — matching the resolution Atlas/Ops Manager and the
+capacity engine already use (~3,600× fewer points than raw per-second, ~24K points per
+node per 90 days instead of ~85M, with no loss in trend/forecast accuracy). Gauges are
+averaged per hour; spiky series (CPU, IOPS) use the per-hour max so peaks survive for
+p95. Override the bucket with `PS_AGENT_FTDC_BUCKET_SECONDS` (e.g. `300` for 5-minute).
+All nodes of a replica set import into a single cluster source, each keeping its own
+per-node series; capacity rolls up across nodes automatically.
+
+The decoder reads the FTDC archive format directly (zlib + delta/varint
+reconstruction; no external tool) and extracts the canonical capacity series:
+WiredTiger cache used, normalized CPU (user/kernel), disk space used/free, total
+IOPS, and opcounter rates. OS-level CPU/disk metrics are present only on **Linux**
+hosts (`/proc`); the MongoDB serverStatus series (cache, connections, opcounters)
+are always available. Points are appended idempotently, so re-importing overlapping
+files — or importing a whole `diagnostic.data` directory spanning days — is safe and
+builds the history the capacity engine needs for growth + days-until-full.
+
+> The dashboard "Attach FTDC" button uploads a **single** `metrics.*` file (held in
+> memory for that one request). For large multi-file / multi-node imports, prefer the
+> CLI, which streams from disk and never loads everything at once.
+
+Each import records **provenance** on the source (metadata only — no raw bytes):
+which paths were ingested, how many files, which nodes, and the data **time range**
+covered, plus a per-node coverage roll-up (`from → to`, earliest→latest across all
+imports). See it in `GET /api/sources` (`ftdcProvenance`) or the dashboard cluster
+detail view — handy for knowing what history you already have and which gaps to
+re-import.
+
+### mdiag (OS/kernel tunings)
+
+getMongoData doesn't capture OS-level settings. For those, also run MongoDB's
+[**mdiag.sh**](https://github.com/mongodb/support-tools/tree/master/mdiag)
+(Linux) and attach its JSON to the same cluster — it unlocks the OS risk-register
+checks (swappiness, THP, read-ahead, max_map_count, TCP keepalive, file
+descriptors, SELinux, NUMA):
+
+```bash
+# On the node (Linux):
+sudo bash mdiag.sh --json <ticket-ref>      # writes /tmp/mdiag-<host>.json
+
+# Attach to an existing deployment:
+ps-agent import --mdiag --file mdiag-host.json --source <sourceId>
+#   or standalone:  ps-agent import --mdiag --file mdiag-host.json --name host
+#   or:  curl -X POST http://127.0.0.1:4000/api/sources/<id>/mdiag/import --data-binary @mdiag-host.json
+#   or:  dashboard → open the cluster → "Attach mdiag" → upload the file
+```
+
 ## MCP sources
 
 Scan a deployment through a MongoDB **MCP server**. The collector always aims
@@ -221,6 +392,18 @@ is kept server-side only to run scans.
 | `GET` | `/api/risks` | Cross-fleet findings (risk inbox) |
 | `GET` | `/api/sources` | Registered sources (redacted) |
 | `POST` | `/api/sources` | Register `{ name, connectionString \| atlas \| mcp \| opsManager }` |
+| `POST` | `/api/sources/import` | **Unified import**: multipart upload of any mix of getMongoData/mdiag/FTDC → one source |
+| `POST` | `/api/sources/:id/import` | Same, enriching an existing source (multipart) |
+| `POST` | `/api/sources/offline/import` | Import a getMongoData log (raw body) → offline source |
+| `POST` | `/api/sources/:id/mdiag/import` | Attach an mdiag OS report to a source (raw body) |
+| `POST` | `/api/sources/:id/ftdc/import` | Attach FTDC metrics (binary body) for offline capacity trends |
+| `GET` | `/api/sources/:id/risks` | Risk-register assessment for a cluster |
+| `GET` | `/api/catalog` | List the risk catalog |
+| `POST` | `/api/catalog` | Add/upsert a risk (auto-ids new entries) |
+| `PATCH` | `/api/catalog/:id` | Edit, or toggle `{ enabled }` |
+| `DELETE` | `/api/catalog/:id` | Delete a risk |
+| `GET` | `/api/catalog/export` | Download the catalog as JSON |
+| `POST` | `/api/catalog/import?mode=merge\|replace` | Import catalog JSON (raw body) |
 | `DELETE` | `/api/sources/:id` | Remove a source |
 | `PATCH` | `/api/sources/:id/config` | Set `{ schedule, thresholdOverrides }` |
 | `POST` | `/api/sources/:id/scan?summarize=1` | Run a scan |
@@ -385,7 +568,10 @@ src/
 │  ├─ direct/   DirectCollector (mongodb driver)
 │  ├─ atlas/    AtlasCollector (Admin API) + DigestClient (HTTP Digest auth)
 │  ├─ mcp/      McpCollector (MongoDB MCP server, stdio/http)
-│  └─ opsmanager/  OpsManagerCollector (OM Public API; reuses DigestClient)
+│  ├─ opsmanager/  OpsManagerCollector (OM Public API; reuses DigestClient)
+│  ├─ getmongodata/  parse.ts — offline import of getMongoData.js exports
+│  └─ mdiag/        parse.ts — OS/kernel facts from mdiag.sh --json exports
+├─ risks/      expert risk register: catalog (json) + evaluators + LLM matcher
 ├─ checks/      rule-engine registry, checks (incl. atlas.ts), scoring
 ├─ agent/       LangGraph layer
 │  ├─ llm.ts            provider-agnostic chat-model factory

@@ -2,15 +2,18 @@ import { FileScanStore } from "./fileStore.js";
 import { FileSourceStore } from "./sourceStore.js";
 import { FileAuditLog } from "./auditLog.js";
 import { FileMetricStore } from "./fileMetricStore.js";
+import { FileCatalogStore } from "./fileCatalogStore.js";
 import type { ScanStore } from "./store.js";
 import type { SourceStore } from "./sourceStore.js";
 import type { AuditLog } from "./auditLog.js";
 import type { MetricSeriesStore } from "./metricStore.js";
+import type { CatalogStore } from "./catalogStore.js";
 import { mongoStoreEnabled } from "./mongo/client.js";
 import { MongoSourceStore } from "./mongo/mongoSourceStore.js";
 import { MongoScanStore } from "./mongo/mongoScanStore.js";
 import { MongoAuditLog } from "./mongo/mongoAuditLog.js";
 import { MongoMetricStore } from "./mongo/mongoMetricStore.js";
+import { MongoCatalogStore } from "./mongo/mongoCatalogStore.js";
 
 /**
  * Selects the persistence backend. If a MongoDB store URI is configured
@@ -23,6 +26,7 @@ export interface Stores {
   scans: ScanStore;
   audit: AuditLog;
   metrics: MetricSeriesStore;
+  catalog: CatalogStore;
   backend: "mongodb" | "file";
 }
 
@@ -33,6 +37,7 @@ export function createStores(): Stores {
       scans: new MongoScanStore(),
       audit: new MongoAuditLog(),
       metrics: new MongoMetricStore(),
+      catalog: new MongoCatalogStore(),
       backend: "mongodb",
     };
   }
@@ -41,6 +46,7 @@ export function createStores(): Stores {
     scans: new FileScanStore(),
     audit: new FileAuditLog(),
     metrics: new FileMetricStore(),
+    catalog: new FileCatalogStore(),
     backend: "file",
   };
 }
