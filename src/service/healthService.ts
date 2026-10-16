@@ -9,7 +9,7 @@ import { detectDiagnostic, looksLikeJsonPrefix, type DiagnosticKind } from "../c
 import { createNodeReconciler } from "../core/nodeIdentity.js";
 import { redactSource } from "../store/sourceStore.js";
 import { createStores } from "../store/factory.js";
-import type { ScanStore, ScanSnapshotMeta } from "../store/store.js";
+import type { ScanStore, ScanSnapshotMeta, ReportStore } from "../store/store.js";
 import type { SourceStore } from "../store/sourceStore.js";
 import { createChatModelFromEnv } from "../agent/llm.js";
 import {
@@ -174,6 +174,7 @@ export class HealthService {
   private readonly audit: AuditLog;
   private readonly metrics: MetricSeriesStore;
   private readonly catalog: CatalogStore;
+  private readonly reports: ReportStore;
   /** Which persistence backend is active ("mongodb" | "file"). */
   readonly storeBackend: "mongodb" | "file";
 
@@ -188,6 +189,7 @@ export class HealthService {
     audit?: AuditLog;
     metrics?: MetricSeriesStore;
     catalog?: CatalogStore;
+    reports?: ReportStore;
   }) {
     const defaults = createStores();
     this.sources = overrides?.sources ?? defaults.sources;
@@ -195,6 +197,7 @@ export class HealthService {
     this.audit = overrides?.audit ?? defaults.audit;
     this.metrics = overrides?.metrics ?? defaults.metrics;
     this.catalog = overrides?.catalog ?? defaults.catalog;
+    this.reports = overrides?.reports ?? defaults.reports;
     this.storeBackend = defaults.backend;
     // Prime the active (enabled-only) catalog for scan-time risk findings.
     void this.refreshActiveCatalog();
@@ -902,6 +905,7 @@ export class HealthService {
     const ok = await this.sources.remove(id);
     if (ok) {
       await this.metrics.removeSource(id).catch(() => undefined);
+      await this.reports.removeForSource(id).catch(() => undefined);
       await this.audit.record({ action: "source.remove", sourceId: id });
     }
     return ok;
@@ -921,12 +925,65 @@ export class HealthService {
     return this.metrics.listMetrics(sourceId);
   }
 
+  /** finishedAt of the most recent scan for a source, or null if none exists. */
+  private async latestScanAt(sourceId: string): Promise<Date | null> {
+    const metas = await this.scans.listScans(sourceId);
+    return metas[0]?.finishedAt ?? null;
+  }
+
+  /**
+   * Whether a cached report is still valid relative to scan data: it must have
+   * been computed from the current latest scan (same finishedAt). Any newer
+   * scan — or a first-ever scan where the cache had none — invalidates it.
+   */
+  private cacheStillValid(cachedBasedOnScanAt: Date | null, latestScanAt: Date | null): boolean {
+    const a = cachedBasedOnScanAt ? cachedBasedOnScanAt.getTime() : null;
+    const b = latestScanAt ? latestScanAt.getTime() : null;
+    return a === b;
+  }
+
+  /**
+   * Return the last computed capacity report for a source, recomputing only when
+   * necessary. By default the cached result is reused as long as it was computed
+   * from the current latest scan; pass `{ refresh: true }` to force a recompute.
+   * Pass `{ cachedOnly: true }` to return the cached report if (and only if) a
+   * valid one exists, without ever computing — returns null otherwise. This lets
+   * the UI auto-display an existing report on open without triggering the
+   * expensive compute (Atlas/OpsManager API calls) for sources never computed.
+   */
+  async getCapacityReport(sourceId: string, opts: { cachedOnly: true }): Promise<CapacityReport | null>;
+  async getCapacityReport(sourceId: string, opts?: { refresh?: boolean }): Promise<CapacityReport>;
+  async getCapacityReport(
+    sourceId: string,
+    opts: { refresh?: boolean; cachedOnly?: boolean } = {},
+  ): Promise<CapacityReport | null> {
+    const latestScanAt = await this.latestScanAt(sourceId);
+    if (!opts.refresh) {
+      const cached = await this.reports.getReport<CapacityReport>(sourceId, "capacity");
+      if (cached && this.cacheStillValid(cached.basedOnScanAt, latestScanAt)) {
+        return { ...cached.payload, cached: true, cachedAt: cached.computedAt.toISOString() };
+      }
+    }
+    if (opts.cachedOnly) return null; // nothing valid cached; don't compute.
+    const fresh = await this.computeCapacityReport(sourceId);
+    await this.reports
+      .saveReport<CapacityReport>({
+        sourceId,
+        kind: "capacity",
+        computedAt: new Date(),
+        basedOnScanAt: latestScanAt,
+        payload: fresh,
+      })
+      .catch(() => undefined); // caching is best-effort; never fail the request
+    return { ...fresh, cached: false };
+  }
+
   /**
    * Compute a capacity report (growth, utilization, scale recommendation) from
    * the stored metric history + the latest scan's cluster spec. Deterministic;
    * the LLM only narrates it later.
    */
-  async getCapacityReport(sourceId: string): Promise<CapacityReport> {
+  private async computeCapacityReport(sourceId: string): Promise<CapacityReport> {
     const windowDays = numEnvDays();
     const since = new Date(Date.now() - windowDays * 86_400_000);
     const source = await this.sources.get(sourceId);
@@ -983,12 +1040,47 @@ export class HealthService {
   }
 
   /**
+   * Return the last computed risk report for a source, recomputing only when
+   * necessary. The risk report involves an LLM round-trip, so by default the
+   * cached result is reused as long as it was computed from the current latest
+   * scan; pass `{ refresh: true }` to force a recompute. Pass
+   * `{ cachedOnly: true }` to return the cached report only if a valid one
+   * exists (returns null otherwise) without triggering the LLM-backed compute.
+   */
+  async getRiskReport(sourceId: string, opts: { cachedOnly: true }): Promise<RiskReport | null>;
+  async getRiskReport(sourceId: string, opts?: { refresh?: boolean }): Promise<RiskReport>;
+  async getRiskReport(
+    sourceId: string,
+    opts: { refresh?: boolean; cachedOnly?: boolean } = {},
+  ): Promise<RiskReport | null> {
+    const latestScanAt = await this.latestScanAt(sourceId);
+    if (!opts.refresh) {
+      const cached = await this.reports.getReport<RiskReport>(sourceId, "risks");
+      if (cached && this.cacheStillValid(cached.basedOnScanAt, latestScanAt)) {
+        return { ...cached.payload, cached: true, cachedAt: cached.computedAt.toISOString() };
+      }
+    }
+    if (opts.cachedOnly) return null; // nothing valid cached; don't compute.
+    const fresh = await this.computeRiskReport(sourceId);
+    await this.reports
+      .saveReport<RiskReport>({
+        sourceId,
+        kind: "risks",
+        computedAt: new Date(),
+        basedOnScanAt: latestScanAt,
+        payload: fresh,
+      })
+      .catch(() => undefined); // caching is best-effort; never fail the request
+    return { ...fresh, cached: false };
+  }
+
+  /**
    * Assess a cluster against the expert risk register (risks-catalog.json).
    * Deterministic evaluators mark risks detected/clear/unknown; remaining risks
    * are "manual", and (if an LLM is configured) cross-referenced as advisory
    * "suggested" matches. Uses the most recent scan's facts.
    */
-  async getRiskReport(sourceId: string): Promise<RiskReport> {
+  private async computeRiskReport(sourceId: string): Promise<RiskReport> {
     const metas = await this.scans.listScans(sourceId);
     const scan = metas[0] ? await this.scans.getScan(metas[0].id) : null;
     if (!scan) {

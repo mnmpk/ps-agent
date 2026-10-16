@@ -10,7 +10,7 @@
     "ps-agent": "./dist/cli/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && mkdir -p dist/risks && cp src/risks/risks-catalog.json dist/risks/",
+    "build": "tsc -p tsconfig.json && mkdir -p dist/risks && cp src/risks/risks-catalog.json dist/risks/ && mkdir -p dist/skills && cp -R src/skills/catalog dist/skills/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "scan": "tsx src/cli/index.ts scan",
     "dev": "tsx src/cli/index.ts",

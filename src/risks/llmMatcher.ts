@@ -5,6 +5,7 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import type { CollectedFacts } from "../core/types.js";
 import type { LlmConfig } from "../agent/llm.js";
 import type { RiskAssessment, RiskCatalogEntry } from "./types.js";
+import { renderSkillsPrompt } from "../skills/index.js";
 
 const SYSTEM = `You are a MongoDB reliability expert cross-referencing an expert RISK REGISTER
 against one cluster's collected diagnostic facts.
@@ -56,10 +57,15 @@ export async function matchRisksWithLlm(
     })),
   };
 
+  // Relevance context for skill selection: the candidate risk names/descriptions.
+  const skillContext = candidates
+    .map((r) => `${r.name} ${r.description}`)
+    .join(" ");
+
   const raw =
     provider === "ollama"
-      ? await invokeOllama(model, payload)
-      : await invokeStructured(model, payload);
+      ? await invokeOllama(model, payload, skillContext)
+      : await invokeStructured(model, payload, skillContext);
 
   const parsed = MatchSchema.safeParse(raw);
   if (!parsed.success) return out;
@@ -69,9 +75,15 @@ export async function matchRisksWithLlm(
   return out;
 }
 
-function buildMessages(payload: unknown) {
+function buildMessages(payload: unknown, skillContext = "") {
+  // Inject relevant MongoDB expert skill(s) after the hard rules so the
+  // "never invent facts / be conservative" grounding always takes precedence.
+  const skills = skillContext
+    ? renderSkillsPrompt(skillContext, { limit: 2 })
+    : "";
+  const systemText = skills ? `${SYSTEM}\n\n${skills}` : SYSTEM;
   return [
-    new SystemMessage(SYSTEM),
+    new SystemMessage(systemText),
     new HumanMessage(
       "Cross-reference these candidate risks against the cluster facts. Return only risks with evidence.\n\n```json\n" +
         JSON.stringify(payload, null, 2) +
@@ -80,15 +92,23 @@ function buildMessages(payload: unknown) {
   ];
 }
 
-async function invokeStructured(model: BaseChatModel, payload: unknown): Promise<unknown> {
+async function invokeStructured(
+  model: BaseChatModel,
+  payload: unknown,
+  skillContext = "",
+): Promise<unknown> {
   const structured = (model as any).withStructuredOutput(MatchSchema, { name: "risk_matches" });
-  return structured.invoke(buildMessages(payload));
+  return structured.invoke(buildMessages(payload, skillContext));
 }
 
-async function invokeOllama(model: BaseChatModel, payload: unknown): Promise<unknown> {
+async function invokeOllama(
+  model: BaseChatModel,
+  payload: unknown,
+  skillContext = "",
+): Promise<unknown> {
   const schema = zodToJsonSchema(MatchSchema);
   const bound = (model as any).bind ? (model as any).bind({ format: schema }) : model;
-  const res = await bound.invoke(buildMessages(payload));
+  const res = await bound.invoke(buildMessages(payload, skillContext));
   const text = typeof res.content === "string" ? res.content : JSON.stringify(res.content);
   try {
     return JSON.parse(text);

@@ -113,4 +113,11 @@ export interface CapacityReport {
   windowDays: number;
   /** Non-fatal notes (e.g. insufficient history, unknown limits). */
   notes: string[];
+  /**
+   * Cache metadata (set by the service layer). `cached` is true when this report
+   * was served from the last stored run rather than recomputed; `cachedAt` is
+   * when it was originally computed (ISO). Absent on a freshly computed report.
+   */
+  cached?: boolean;
+  cachedAt?: string;
 }

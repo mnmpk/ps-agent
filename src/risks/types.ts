@@ -41,4 +41,11 @@ export interface RiskReport {
     unknown: number;
   };
   assessments: RiskAssessment[];
+  /**
+   * Cache metadata (set by the service layer). `cached` is true when this report
+   * was served from the last stored run rather than recomputed; `cachedAt` is
+   * when it was originally computed (ISO). Absent on a freshly computed report.
+   */
+  cached?: boolean;
+  cachedAt?: string;
 }

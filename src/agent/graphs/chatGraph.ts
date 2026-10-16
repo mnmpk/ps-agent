@@ -10,6 +10,7 @@ import {
 } from "@langchain/core/messages";
 import type { HealthService } from "../../service/healthService.js";
 import { buildHealthTools } from "../tools/healthTools.js";
+import { renderSkillsPrompt } from "../../skills/index.js";
 
 const SYSTEM_PROMPT = `You are ps-agent, a MongoDB deployment health assistant.
 
@@ -263,7 +264,16 @@ async function forceGroundedAnswer(
 
 function ensureSystem(messages: BaseMessage[]): BaseMessage[] {
   if (messages.some((m) => m.getType() === "system")) return messages;
-  return [new SystemMessage(SYSTEM_PROMPT), ...messages];
+  // Inject the MongoDB expert skill(s) most relevant to the user's question.
+  // Skills come AFTER the grounding rules so those rules take precedence.
+  const latestQuestion = [...messages]
+    .reverse()
+    .find((m) => m.getType() === "human");
+  const skills = latestQuestion
+    ? renderSkillsPrompt(messageText(latestQuestion), { limit: 2 })
+    : "";
+  const systemText = skills ? `${SYSTEM_PROMPT}\n\n${skills}` : SYSTEM_PROMPT;
+  return [new SystemMessage(systemText), ...messages];
 }
 
 export interface ChatResult {

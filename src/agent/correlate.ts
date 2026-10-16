@@ -5,6 +5,7 @@ import type { Finding, HealthAnalysis, HealthScore } from "../core/types.js";
 import type { Topology } from "../core/types.js";
 import { HealthAnalysisSchema } from "./schema.js";
 import type { LlmConfig } from "./llm.js";
+import { renderSkillsPrompt } from "../skills/index.js";
 
 const SYSTEM_PROMPT = `You are a MongoDB reliability engineer reviewing an automated health scan.
 You are given DETERMINISTIC findings produced by a rule engine, plus key metrics.
@@ -24,7 +25,22 @@ interface CorrelateInput {
   score: HealthScore;
 }
 
+/** Derive a relevance context for skill selection from the findings. */
+function skillContextFromFindings(findings: Finding[]): string {
+  return findings
+    .map((f) => `${f.category} ${f.title} ${f.detail}`)
+    .join(" ");
+}
+
 function buildMessages(input: CorrelateInput) {
+  // Inject the MongoDB expert skill(s) most relevant to these findings so the
+  // narration can cite best-practice guidance. Placed after the hard rules so
+  // the "do not invent facts" grounding always wins.
+  const skills = renderSkillsPrompt(skillContextFromFindings(input.findings), {
+    limit: 2,
+  });
+  const systemText = skills ? `${SYSTEM_PROMPT}\n\n${skills}` : SYSTEM_PROMPT;
+
   const payload = {
     deployment: input.sourceName,
     host: input.host,
@@ -40,7 +56,7 @@ function buildMessages(input: CorrelateInput) {
     })),
   };
   return [
-    new SystemMessage(SYSTEM_PROMPT),
+    new SystemMessage(systemText),
     new HumanMessage(
       `Analyze this scan and return the structured analysis.\n\n` +
         "```json\n" +

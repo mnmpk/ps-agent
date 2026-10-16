@@ -3,7 +3,8 @@ import { FileSourceStore } from "./sourceStore.js";
 import { FileAuditLog } from "./auditLog.js";
 import { FileMetricStore } from "./fileMetricStore.js";
 import { FileCatalogStore } from "./fileCatalogStore.js";
-import type { ScanStore } from "./store.js";
+import { FileReportStore } from "./fileReportStore.js";
+import type { ReportStore, ScanStore } from "./store.js";
 import type { SourceStore } from "./sourceStore.js";
 import type { AuditLog } from "./auditLog.js";
 import type { MetricSeriesStore } from "./metricStore.js";
@@ -14,6 +15,7 @@ import { MongoScanStore } from "./mongo/mongoScanStore.js";
 import { MongoAuditLog } from "./mongo/mongoAuditLog.js";
 import { MongoMetricStore } from "./mongo/mongoMetricStore.js";
 import { MongoCatalogStore } from "./mongo/mongoCatalogStore.js";
+import { MongoReportStore } from "./mongo/mongoReportStore.js";
 
 /**
  * Selects the persistence backend. If a MongoDB store URI is configured
@@ -27,6 +29,7 @@ export interface Stores {
   audit: AuditLog;
   metrics: MetricSeriesStore;
   catalog: CatalogStore;
+  reports: ReportStore;
   backend: "mongodb" | "file";
 }
 
@@ -38,6 +41,7 @@ export function createStores(): Stores {
       audit: new MongoAuditLog(),
       metrics: new MongoMetricStore(),
       catalog: new MongoCatalogStore(),
+      reports: new MongoReportStore(),
       backend: "mongodb",
     };
   }
@@ -47,6 +51,7 @@ export function createStores(): Stores {
     audit: new FileAuditLog(),
     metrics: new FileMetricStore(),
     catalog: new FileCatalogStore(),
+    reports: new FileReportStore(),
     backend: "file",
   };
 }

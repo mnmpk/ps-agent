@@ -507,8 +507,6 @@ function renderDetail(scan) {
           \${scoreHtml}
           <div style="margin-top:10px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
             <button class="action scanbtn" data-sid="\${scan.sourceId}" onclick="scanNow('\${scan.sourceId}', true)">Scan now</button>
-            <button class="ghost" onclick="loadCapacity('\${scan.sourceId}')">Capacity</button>
-            <button class="ghost" onclick="loadRisks('\${scan.sourceId}')">Risk register</button>
             <button class="ghost" onclick="document.getElementById('bundleFile').click()" title="Attach any mix of getMongoData, mdiag, or FTDC files (across nodes) — auto-detected and merged into this deployment">Import diagnostics…</button>
             <input type="file" id="bundleFile" multiple style="display:none" onchange="uploadBundle('\${scan.sourceId}', this)" />
             <button class="ghost" onclick="removeSource('\${scan.sourceId}', '\${esc(scan.sourceName)}')">Deregister</button>
@@ -527,6 +525,11 @@ function renderDetail(scan) {
     \${findings}\`;
   const roster = (scan.facts.replSetStatus && scan.facts.replSetStatus.members || []).map(m => m.name);
   loadFtdcProvenance(scan.sourceId, roster);
+  // Auto-display the last computed capacity/risk reports if they're cached;
+  // otherwise show a button so the user can compute them on demand (these are
+  // expensive — Atlas/OpsManager API calls and an LLM round-trip).
+  showCapacity(scan.sourceId);
+  showRisks(scan.sourceId);
 }
 
 // Client-side node-identity reconciliation (mirrors src/core/nodeIdentity.ts) so
@@ -575,28 +578,101 @@ async function loadFtdcProvenance(sourceId, roster) {
   } catch { /* non-fatal */ }
 }
 
-async function loadCapacity(sourceId) {
+// Empty-state placeholder shown when a report has never been computed: a titled
+// panel with a button to compute it on demand (fn = loadCapacity/loadRisks).
+function reportPlaceholder(title, note, fn, sourceId) {
+  return '<div class="panel" style="margin-bottom:20px">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px">'
+    + '<div><div style="font-weight:600">' + esc(title) + '</div>'
+    + '<div class="muted" style="font-size:12px;margin-top:2px">' + esc(note) + '</div></div>'
+    + '<button class="ghost" onclick="' + fn + "('" + esc(sourceId) + "')" + '">Compute now</button>'
+    + '</div></div>';
+}
+
+// Auto-display the cached capacity report if one exists (no compute); otherwise
+// render a placeholder with a "Compute now" button.
+async function showCapacity(sourceId) {
   const panel = document.getElementById('capacity-panel');
   if (!panel) return;
-  panel.innerHTML = '<div class="panel" style="margin-bottom:20px"><div class="muted">Computing capacity report…</div></div>';
   try {
-    const r = await api('/api/sources/' + sourceId + '/capacity');
-    panel.innerHTML = capacityPanel(r);
+    const r = await fetch('/api/sources/' + sourceId + '/capacity?cachedOnly=1');
+    if (r.status === 204) {
+      panel.innerHTML = reportPlaceholder('Capacity & scaling', 'Not yet computed for the latest scan.', 'loadCapacity', sourceId);
+      return;
+    }
+    if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.statusText);
+    panel.innerHTML = capacityPanel(await r.json(), sourceId);
+  } catch (e) {
+    panel.innerHTML = reportPlaceholder('Capacity & scaling', 'Unavailable: ' + e.message, 'loadCapacity', sourceId);
+  }
+}
+
+// Auto-display the cached risk report if one exists (no compute); otherwise
+// render a placeholder with a "Compute now" button.
+async function showRisks(sourceId) {
+  const panel = document.getElementById('risk-panel');
+  if (!panel) return;
+  try {
+    const r = await fetch('/api/sources/' + sourceId + '/risks?cachedOnly=1');
+    if (r.status === 204) {
+      panel.innerHTML = reportPlaceholder('Risk register', 'Not yet assessed for the latest scan.', 'loadRisks', sourceId);
+      return;
+    }
+    if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.statusText);
+    panel.innerHTML = riskPanel(await r.json(), sourceId);
+  } catch (e) {
+    panel.innerHTML = reportPlaceholder('Risk register', 'Unavailable: ' + e.message, 'loadRisks', sourceId);
+  }
+}
+
+async function loadCapacity(sourceId, refresh) {
+  const panel = document.getElementById('capacity-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div class="panel" style="margin-bottom:20px"><div class="muted">' + (refresh ? 'Recomputing capacity report…' : 'Computing capacity report…') + '</div></div>';
+  try {
+    const r = await api('/api/sources/' + sourceId + '/capacity' + (refresh ? '?refresh=1' : ''));
+    panel.innerHTML = capacityPanel(r, sourceId);
   } catch (e) {
     panel.innerHTML = '<div class="panel" style="margin-bottom:20px"><div class="muted">Capacity unavailable: ' + esc(e.message) + '</div></div>';
   }
 }
 
-async function loadRisks(sourceId) {
+async function loadRisks(sourceId, refresh) {
   const panel = document.getElementById('risk-panel');
   if (!panel) return;
-  panel.innerHTML = '<div class="panel" style="margin-bottom:20px"><div class="muted">Assessing against the risk register…</div></div>';
+  panel.innerHTML = '<div class="panel" style="margin-bottom:20px"><div class="muted">' + (refresh ? 'Re-assessing against the risk register…' : 'Assessing against the risk register…') + '</div></div>';
   try {
-    const r = await api('/api/sources/' + sourceId + '/risks');
-    panel.innerHTML = riskPanel(r);
+    const r = await api('/api/sources/' + sourceId + '/risks' + (refresh ? '?refresh=1' : ''));
+    panel.innerHTML = riskPanel(r, sourceId);
   } catch (e) {
     panel.innerHTML = '<div class="panel" style="margin-bottom:20px"><div class="muted">Risk assessment unavailable: ' + esc(e.message) + '</div></div>';
   }
+}
+
+// A small header line shown on cached reports: when it was last computed plus a
+// Refresh button that forces a recompute. kind is 'capacity' or 'risks'.
+function cacheMeta(r, sourceId, kind) {
+  const when = r.cached && r.cachedAt
+    ? 'Last computed ' + fmtWhen(r.cachedAt)
+    : 'Just computed';
+  const fn = kind === 'capacity' ? 'loadCapacity' : 'loadRisks';
+  return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">'
+    + '<span class="muted" style="font-size:11px">' + (r.cached ? '⟳ cached · ' : '') + esc(when) + '</span>'
+    + '<button class="ghost" style="font-size:11px;padding:2px 8px" onclick="' + fn + "('" + esc(sourceId) + "', true)" + '">Refresh</button>'
+    + '</div>';
+}
+
+/** Human-friendly relative/absolute timestamp for a stored ISO date. */
+function fmtWhen(iso) {
+  try {
+    const d = new Date(iso);
+    const mins = Math.round((Date.now() - d.getTime()) / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + ' min ago';
+    const hrs = Math.round(mins / 60);
+    if (hrs < 24) return hrs + ' hr ago';
+    return d.toLocaleString();
+  } catch { return esc(iso); }
 }
 
 // Toggle folder selection on the Add-deployment offline file input.
@@ -658,7 +734,7 @@ function riskStatusBadge(s) {
   return '<span class="badge ' + cls + '">' + label + '</span>';
 }
 
-function riskPanel(r) {
+function riskPanel(r, sourceId) {
   const c = r.counts;
   const summary = '<div class="pills" style="margin-bottom:12px">'
     + '<span class="pill crit">' + c.detected + ' detected</span>'
@@ -681,6 +757,7 @@ function riskPanel(r) {
     + '</div>';
   return '<div class="panel" style="margin-bottom:20px">'
     + '<div style="font-weight:600;margin-bottom:8px">Risk register <span class="muted" style="font-weight:400;font-size:12px">(' + r.assessments.length + ' expert risks)</span></div>'
+    + cacheMeta(r, sourceId, 'risks')
     + summary
     + (active.length? '<div class="muted" style="font-size:12px;margin:6px 0 4px">Detected &amp; suggested</div>' + active.map(rowHtml).join('') : '<div class="muted">No risks auto-detected.</div>')
     + (review.length? '<details style="margin-top:10px"><summary class="muted" style="cursor:pointer;font-size:12px">' + review.length + ' risks needing manual review</summary><div style="margin-top:8px">' + review.map(rowHtml).join('') + '</div></details>' : '')
@@ -714,7 +791,7 @@ function scaleCard(scale) {
     + '</div>';
 }
 
-function capacityPanel(r) {
+function capacityPanel(r, sourceId) {
   const limitNote = r.hasLimits ? '' : '<div class="muted" style="font-size:12px;margin-bottom:10px">⚠ Limits unknown — add an Atlas API key + cluster name for full capacity analysis.</div>';
   // Growth
   const disk = (r.growth || []).find(g => g.metric && g.metric.indexOf('DISK') >= 0);
@@ -735,6 +812,7 @@ function capacityPanel(r) {
 
   return '<div class="panel" style="margin-bottom:20px">'
     + '<div style="font-weight:600;margin-bottom:8px">Capacity &amp; scaling <span class="muted" style="font-weight:400;font-size:12px">(last ' + r.windowDays + ' days)</span></div>'
+    + cacheMeta(r, sourceId, 'capacity')
     + limitNote
     + scaleCard(r.scale)
     + '<div style="margin:14px 0 6px">' + growthHtml + '</div>'

@@ -23,6 +23,10 @@ import { isMultipart, parseMultipart } from "./multipart.js";
  *   POST /api/sources/:id/scan      run a scan (?summarize=1)
  *   GET  /api/scans?sourceId=:id    list scan snapshots
  *   GET  /api/scans/:scanId         full scan result (facts+findings+analysis)
+ *   GET  /api/sources/:id/capacity  capacity report (cached; ?refresh=1 recomputes,
+ *                                   ?cachedOnly=1 returns cache or 204, no compute)
+ *   GET  /api/sources/:id/risks     risk register report (cached; ?refresh=1 recomputes,
+ *                                   ?cachedOnly=1 returns cache or 204, no compute)
  */
 export interface ApiServerOptions {
   port?: number;
@@ -374,22 +378,41 @@ async function handle(
   }
 
   // Capacity report: growth, utilization, scale recommendation, bottlenecks.
+  // Served from the last stored run by default; ?refresh=1 forces a recompute.
+  // ?cachedOnly=1 returns the cached report if present, else 204 (no compute) —
+  // used by the dashboard to auto-display an existing report on open.
   const sourceCapacity = path.match(/^\/api\/sources\/([^/]+)\/capacity$/);
   if (method === "GET" && sourceCapacity) {
     const id = decodeURIComponent(sourceCapacity[1]!);
+    const refresh = isTruthyParam(url.searchParams.get("refresh"));
+    const cachedOnly = isTruthyParam(url.searchParams.get("cachedOnly"));
     try {
-      return sendJson(res, 200, await service.getCapacityReport(id));
+      if (cachedOnly) {
+        const cached = await service.getCapacityReport(id, { cachedOnly: true });
+        if (!cached) return sendStatus(res, 204);
+        return sendJson(res, 200, cached);
+      }
+      return sendJson(res, 200, await service.getCapacityReport(id, { refresh }));
     } catch (err) {
       return sendJson(res, 400, { error: (err as Error).message });
     }
   }
 
   // Risk register assessment (expert catalog cross-referenced vs this cluster).
+  // Served from the last stored run by default; ?refresh=1 forces a recompute.
+  // ?cachedOnly=1 returns the cached report if present, else 204 (no compute).
   const sourceRisks = path.match(/^\/api\/sources\/([^/]+)\/risks$/);
   if (method === "GET" && sourceRisks) {
     const id = decodeURIComponent(sourceRisks[1]!);
+    const refresh = isTruthyParam(url.searchParams.get("refresh"));
+    const cachedOnly = isTruthyParam(url.searchParams.get("cachedOnly"));
     try {
-      return sendJson(res, 200, await service.getRiskReport(id));
+      if (cachedOnly) {
+        const cached = await service.getRiskReport(id, { cachedOnly: true });
+        if (!cached) return sendStatus(res, 204);
+        return sendJson(res, 200, cached);
+      }
+      return sendJson(res, 200, await service.getRiskReport(id, { refresh }));
     } catch (err) {
       return sendJson(res, 400, { error: (err as Error).message });
     }
@@ -439,6 +462,18 @@ async function handle(
   }
 
   sendJson(res, 404, { error: `No route for ${method} ${path}` });
+}
+
+/** Treats ?param=1|true|yes (case-insensitive) as true; anything else false. */
+function isTruthyParam(v: string | null): boolean {
+  if (!v) return false;
+  return ["1", "true", "yes"].includes(v.toLowerCase());
+}
+
+/** Send an empty response with just a status code (e.g. 204 No Content). */
+function sendStatus(res: ServerResponse, status: number): void {
+  res.writeHead(status);
+  res.end();
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
