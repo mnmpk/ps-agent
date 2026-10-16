@@ -238,7 +238,7 @@ async function renderFleet() {
       <div class="addfields" id="fields-offline" style="display:none;flex-direction:column;align-items:flex-start;gap:6px">
         <input type="file" id="offlineFile" multiple />
         <label class="muted" style="font-size:12px;cursor:pointer"><input type="checkbox" id="offlineDir" onchange="onOfflineDir()" /> select a whole folder instead</label>
-        <span class="muted" style="font-size:12px">Drop in ANY mix of getMongoData, mdiag, and FTDC files — across multiple nodes. Each file is auto-detected and imported into one deployment.</span>
+        <span class="muted" style="font-size:12px">Drop in ANY mix of getMongoData, mdiag, FTDC, and mongod.log files — across multiple nodes. Each file is auto-detected and imported into one deployment.</span>
       </div>
       <div id="atlas-extra" style="display:none;margin-top:8px">
         <label class="muted" style="font-size:12px;cursor:pointer">
@@ -507,7 +507,7 @@ function renderDetail(scan) {
           \${scoreHtml}
           <div style="margin-top:10px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
             <button class="action scanbtn" data-sid="\${scan.sourceId}" onclick="scanNow('\${scan.sourceId}', true)">Scan now</button>
-            <button class="ghost" onclick="document.getElementById('bundleFile').click()" title="Attach any mix of getMongoData, mdiag, or FTDC files (across nodes) — auto-detected and merged into this deployment">Import diagnostics…</button>
+            <button class="ghost" onclick="document.getElementById('bundleFile').click()" title="Attach any mix of getMongoData, mdiag, FTDC, or mongod.log files (across nodes) — auto-detected and merged into this deployment">Import diagnostics…</button>
             <input type="file" id="bundleFile" multiple style="display:none" onchange="uploadBundle('\${scan.sourceId}', this)" />
             <button class="ghost" onclick="removeSource('\${scan.sourceId}', '\${esc(scan.sourceName)}')">Deregister</button>
           </div>
@@ -703,7 +703,7 @@ async function importDiagnostics(files, name, sourceId) {
     if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.statusText);
     const res = await r.json();
     const c = res.counts || {};
-    const summary = 'Imported: ' + (c.getMongoData||0) + ' getMongoData · ' + (c.mdiag||0) + ' mdiag · ' + (c.ftdc||0) + ' FTDC'
+    const summary = 'Imported: ' + (c.getMongoData||0) + ' getMongoData · ' + (c.mdiag||0) + ' mdiag · ' + (c.ftdc||0) + ' FTDC · ' + (c.mongodLog||0) + ' mongod.log'
       + (c.unknown ? ' · ' + c.unknown + ' unrecognized' : '') + ' (' + (res.nodes||[]).length + ' node(s))';
     if (sourceId) {
       note(summary + ' — refreshing…');

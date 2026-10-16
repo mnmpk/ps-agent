@@ -224,6 +224,27 @@ async function handle(
     }
   }
 
+  // mongod.log import: raw body = a structured JSON mongod.log (4.4+). Standalone
+  // (/api/sources/log/import) creates an offline source; the per-source form
+  // (/api/sources/:id/log/import) enriches that source with log signals.
+  const logPerSource = path.match(/^\/api\/sources\/([^/]+)\/log\/import$/);
+  if (method === "POST" && (path === "/api/sources/log/import" || logPerSource)) {
+    const raw = await readRawBody(req);
+    if (!raw) return sendJson(res, 400, { error: "empty body; POST a mongod.log (structured JSON)" });
+    const sourceId = logPerSource
+      ? decodeURIComponent(logPerSource[1]!)
+      : url.searchParams.get("sourceId") ?? undefined;
+    try {
+      const scan = await service.importMongodLog(raw, {
+        name: url.searchParams.get("name") ?? undefined,
+        sourceId,
+      });
+      return sendJson(res, 200, scan);
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
+  }
+
   // FTDC import: binary body = one diagnostic.data/metrics.* archive file.
   // Standalone (/api/sources/ftdc/import) creates an offline source from the
   // FTDC snapshot + metrics; the per-source form (/api/sources/:id/ftdc/import)

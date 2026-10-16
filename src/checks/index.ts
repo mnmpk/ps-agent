@@ -8,6 +8,7 @@ import "./resource.js";
 import "./configuration.js";
 import "./atlas.js";
 import "./storage.js";
+import "./log.js";
 
 export * from "./registry.js";
 export { scoreFindings } from "./score.js";

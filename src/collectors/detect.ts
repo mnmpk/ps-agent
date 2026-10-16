@@ -9,9 +9,10 @@ import { looksLikeBsonHeader } from "./ftdc/decode.js";
  *   getMongoData — cluster-level JSON array (serverStatus/dbStats/replset/…)
  *   mdiag        — node-level OS/kernel JSON array (sysctl/THP/ulimit/SELinux/…)
  *   ftdc         — node-level binary BSON metric stream (diagnostic.data/metrics.*)
+ *   mongodLog    — node-level structured JSON log (NDJSON of {t,s,c,id,msg,attr})
  *   unknown      — anything we can't confidently classify
  */
-export type DiagnosticKind = "getMongoData" | "mdiag" | "ftdc" | "unknown";
+export type DiagnosticKind = "getMongoData" | "mdiag" | "ftdc" | "mongodLog" | "unknown";
 
 export interface DetectResult {
   kind: DiagnosticKind;
@@ -40,8 +41,13 @@ export function detectDiagnostic(buf: Buffer, filename?: string): DetectResult {
       const kind = classifyJsonEntries(arr);
       if (kind !== "unknown") return { kind, reason: "JSON section vocabulary" };
     }
+    // Not a JSON array — could be a structured mongod.log (NDJSON: one JSON
+    // object per line, each with log-entry fields t/s/c/msg).
+    if (looksLikeMongodLog(text)) {
+      return { kind: "mongodLog", reason: "structured mongod.log JSON lines ({t,s,c,msg})" };
+    }
     // JSON but unrecognized shape.
-    return { kind: "unknown", reason: "JSON but not a recognized getMongoData/mdiag export" };
+    return { kind: "unknown", reason: "JSON but not a recognized getMongoData/mdiag/mongod.log export" };
   }
 
   return { kind: "unknown", reason: "unrecognized format" };
@@ -60,6 +66,38 @@ function looksLikeJsonStart(buf: Buffer): boolean {
     const c = buf[i]!;
     if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) continue; // ws
     return c === 0x5b || c === 0x7b; // '[' or '{'
+  }
+  return false;
+}
+
+/**
+ * True if the text looks like a structured mongod.log (MongoDB 4.4+): the first
+ * few non-empty lines are JSON objects carrying log-entry fields. We require a
+ * couple of the canonical keys (`t`/`s`/`c`/`msg`) to avoid matching other
+ * NDJSON. Checks up to the first 20 lines so a stray blank/partial line at the
+ * start doesn't defeat detection.
+ */
+function looksLikeMongodLog(text: string): boolean {
+  const lines = text.split(/\r?\n/);
+  let checked = 0;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line[0] !== "{") return false; // structured logs are per-line objects
+    try {
+      const o = JSON.parse(line);
+      if (o && typeof o === "object") {
+        const hasSev = typeof o.s === "string";
+        const hasComp = typeof o.c === "string";
+        const hasMsg = typeof o.msg === "string";
+        const hasTs = o.t != null;
+        // Require the message plus at least one of severity/component/timestamp.
+        if (hasMsg && (hasSev || hasComp || hasTs)) return true;
+      }
+    } catch {
+      /* truncated/last line — keep scanning a few more */
+    }
+    if (++checked >= 20) break;
   }
   return false;
 }

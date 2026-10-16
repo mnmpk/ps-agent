@@ -77,6 +77,24 @@ export const SourceSchema = z.object({
         .default({}),
     })
     .optional(),
+  /**
+   * Aggregated slow-query signals distilled from imported mongod.log file(s),
+   * per namespace. Stored (compact, redaction-safe — no query values) so the
+   * offline capacity report can surface query bottlenecks the same way Atlas/
+   * OpsManager sources do via the Performance Advisor. Replaced on each import.
+   */
+  logQuerySignals: z
+    .array(
+      z.object({
+        namespace: z.string(),
+        slowCount: z.number().int().nonnegative(),
+        collscanCount: z.number().int().nonnegative(),
+        worstScannedPerReturned: z.number().nonnegative(),
+        maxDurationMs: z.number().nonnegative(),
+        example: z.string().optional(),
+      }),
+    )
+    .optional(),
   /** Scheduling + threshold overrides for this deployment. */
   schedule: z
     .object({

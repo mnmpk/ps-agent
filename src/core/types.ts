@@ -147,6 +147,52 @@ export interface OsFacts {
   warnings?: string[];
 }
 
+/**
+ * Operational signals distilled from a mongod.log file (structured JSON, 4.4+).
+ * Unlike serverStatus (a point-in-time snapshot), these summarize events that
+ * happened over the log's time range — errors, elections, restarts, storage
+ * warnings, etc. Produced by the offline mongod.log parser; consumed by the
+ * `log.*` health checks. Defensive: any field may be absent/zero.
+ */
+export interface LogFacts {
+  /** Count of lines at severity Error ("E") and Fatal ("F"). */
+  errorCount: number;
+  fatalCount: number;
+  /** Count of Warning ("W") lines. */
+  warningCount: number;
+  /** Total lines parsed (for rates/denominators). */
+  totalLines: number;
+  /** Process startups seen (each indicates a (re)start of mongod). */
+  startupCount: number;
+  /** Unclean shutdowns / shutdown-on-signal events. */
+  uncleanShutdownCount: number;
+  /** Replica-set elections observed (component REPL_ELECTION / election msgs). */
+  electionCount: number;
+  /** Replica-set state transitions to PRIMARY/SECONDARY/ROLLBACK, etc. */
+  stateChangeCount: number;
+  /** WiredTiger / storage warnings or errors (component STORAGE/WT). */
+  storageWarningCount: number;
+  /** Assertions / invariant failures / fassert. */
+  assertionCount: number;
+  /** Connections accepted (churn signal). */
+  connectionsAccepted: number;
+  /** Connections ended. */
+  connectionsEnded: number;
+  /** Slow-query (OP) lines seen (msg "Slow query"). */
+  slowQueryCount: number;
+  /** Earliest / latest log timestamp observed (ISO), for the covered window. */
+  firstTs?: string;
+  lastTs?: string;
+  /** Hostname, if a startup line reported it (for grouping node-level imports). */
+  hostname?: string;
+  /** mongod version from a startup line, when present. */
+  mongoVersion?: string;
+  /** Most frequent distinct error/fatal messages (top few), for findings. */
+  topErrors?: Array<{ msg: string; count: number; sample?: string }>;
+  /** Non-fatal parse notes (e.g. lines skipped, legacy format detected). */
+  warnings?: string[];
+}
+
 /** Host hardware facts (from db.hostInfo()); the limits for offline/direct capacity. */
 export interface HostInfo {
   hostname?: string;
@@ -297,6 +343,8 @@ export interface CollectedFacts {
   serverParameters?: Record<string, unknown>;
   /** OS/kernel tuning facts from an imported mdiag.sh export (Linux). */
   os?: OsFacts;
+  /** Operational signals from an imported mongod.log file (structured JSON). */
+  log?: LogFacts;
   /** How facts were gathered (for UI + transparency). */
   collectionMethod?: "direct" | "atlas" | "mcp" | "mcp+direct" | "offline";
   /** Non-fatal collection problems (e.g. missing privilege for a command). */

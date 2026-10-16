@@ -71,10 +71,11 @@ agent to drill into findings. Built with **TypeScript + LangChain + LangGraph**.
 
 ## 3. Connection / Source Abstraction
 
-A deployment is registered as a **Source**. One interface, three backends.
+A deployment is registered as a **Source**. One interface, several backends.
+(The implemented schema lives in `src/core/source.ts`.)
 
 ```ts
-type SourceKind = "direct" | "atlas" | "mcp";
+type SourceKind = "direct" | "atlas" | "mcp" | "opsmanager" | "offline";
 
 interface Source {
   id: string;
@@ -86,26 +87,48 @@ interface Source {
   atlas?: { projectId: string; publicKey: string; privateKey: string; clusterName?: string };
   // mcp
   mcp?: { transport: "stdio" | "http"; command?: string; url?: string };
+  // ops manager (self-managed; same metrics path as Atlas)
+  opsManager?: { baseUrl: string; projectId: string; publicKey: string; privateKey: string };
   tags?: string[];
-  createdAt: Date;
-}
-
-interface Collector {
-  topology(): Promise<Topology>;            // RS/sharded members, versions, roles
-  serverStatus(): Promise<ServerStatus>;    // per node
-  replSetStatus(): Promise<ReplSetStatus>;  // lag, health, elections
-  hostMetrics(window): Promise<MetricSeries[]>; // CPU, mem, disk, conns, opcounters
-  indexStats(opts): Promise<IndexUsage[]>;  // unused/duplicate indexes
-  alerts?(): Promise<ExternalAlert[]>;      // Atlas-only
-  advisor?(): Promise<AdvisorSuggestion[]>; // Atlas Performance Advisor
+  // provenance / derived data attached by offline imports (no raw bytes):
+  ftdcProvenance?: {...};            // FTDC ingest events + per-node coverage
+  logQuerySignals?: QuerySignal[];   // aggregated slow queries from mongod.log
+  schedule?: { intervalSeconds?: number; enabled: boolean };
+  thresholdOverrides?: Record<string, number>;
 }
 ```
 
-- **DirectCollector** — `mongodb` Node driver. Uses `admin` db commands. Needs a user with `clusterMonitor` role (read-only monitoring). For metrics trends it samples `serverStatus` on an interval and diffs counters.
-- **AtlasCollector** — `@mongodb-js/atlas` / `atlas-sdk`. Pulls `/processes`, `/processes/{id}/measurements`, `/alerts`, Performance Advisor suggestions. Respects rate limits (Monitoring scope: 300 capacity, refill 100/60s → batch + cache).
-- **MCPCollector** — wraps the MongoDB MCP server as LangChain tools; useful when the agent needs flexible, model-driven exploration rather than fixed queries.
+> `offline` sources carry no credentials — they are populated by *importing*
+> read-only diagnostics (getMongoData / mdiag / FTDC / mongod.log), not by
+> connecting. They are never scanned by the scheduler.
 
-> **Credential handling:** connection strings / Atlas keys stored encrypted (e.g. libsodium sealed box, key from env/KMS). Never logged. Redact in all tool outputs passed to the LLM.
+**Online** sources implement a small `Collector` interface that returns a single
+typed facts bundle (`src/collectors/collector.ts`):
+
+```ts
+interface Collector {
+  collect(): Promise<CollectedFacts>;   // measure only — no health judgements
+  close(): Promise<void>;
+}
+```
+
+`CollectedFacts` aggregates everything a scan gathered: topology, `serverStatus`,
+`replSetStatus`, index usage, Atlas facts, storage, host info, server parameters,
+and the optional offline-only `os` (mdiag) and `log` (mongod.log) fact blocks.
+
+**Offline** inputs are NOT collectors — they are pure parse functions
+(`parseGetMongoData` / `parseMdiag` / `parseFtdc` / `parseMongodLog`) invoked by the
+import flow (§15), which merge their output into `CollectedFacts` and score it.
+
+- **DirectCollector** — `mongodb` Node driver, `admin` db commands. Needs a user with `clusterMonitor`. Also runs `hostInfo`/`dbStats`/`buildInfo` for RAM/cores/limits.
+- **AtlasCollector** — Atlas Admin API (HTTP Digest). Pulls `/processes`, `/processes/{id}/measurements`, `/alerts`, Performance Advisor suggestions, cluster spec, and N-day history. Respects rate limits (batch + cache).
+- **OpsManagerCollector** — the self-managed mirror of Atlas via the OM Public API (`/hosts` + history + slow queries; reuses `DigestClient`; no cluster-tier spec).
+- **McpCollector** — scans through a MongoDB MCP server (stdio/http). With a connection string it also runs the full driver check (`mcp+direct`); without one, data-layer facts only (`mcp`).
+
+> **Credential handling:** connection strings / Atlas & OM keys are **AES-256-GCM
+> encrypted at rest** (`enc:v1:…` envelopes; key from `PS_AGENT_SECRET_KEY` or a
+> generated `secret.key`). Never logged. Redacted in all API responses and in
+> anything passed to the LLM.
 
 ---
 
@@ -226,17 +249,26 @@ interface AgentState {
 
 Store app metadata/snapshots in its own MongoDB (dogfooding) or Postgres.
 
+Implemented collections (Mongo backend; the file backend mirrors each as JSON
+under `~/.ps-agent`). Selected automatically by `createStores()` when a Mongo
+store URI is configured.
+
 ```
-sources            // registered deployments (creds encrypted)
-scans              // { sourceId, startedAt, status, score, summary }
-findings           // { scanId, sourceId, checkId, severity, evidence, rank }
-metric_samples     // short-term series for sparklines / trend (TTL index)
-chat_threads       // LangGraph checkpoints
-audit_log          // who connected what, which tools ran
+sources            // registered deployments (creds encrypted at rest)
+scans              // full ScanResult (facts + findings + score), flattened keys for listing
+metric_series      // capacity time-series {sourceId, processId, metric, ts, value}; TTL index
+risk_catalog       // mutable expert risk register (seeded from risks-catalog.json)
+reports            // cached capacity/risk reports, keyed by (sourceId, kind)
+audit              // append-only: source.register/remove/config, scan.run
+chat_checkpoints   // LangGraph MongoDBSaver (chat memory)
+chat_checkpoint_writes
 ```
 
-- `metric_samples` gets a **TTL index** (e.g. 14 days) to bound growth.
-- `findings.evidence` stores the exact numbers so the UI/LLM cite real data.
+- `metric_series` has a **TTL index** (`PS_AGENT_METRIC_TTL_DAYS`, default 95d) to
+  bound growth, plus a `{sourceId, metric, processId, ts}` index.
+- `scans` embed each finding's `evidence` (exact numbers) so the UI/LLM cite real data.
+- `reports` retains only the latest report per `(sourceId, kind)`; it is invalidated
+  when a newer scan arrives and cleared on source removal (see §17).
 
 ---
 
@@ -284,6 +316,12 @@ audit_log          // who connected what, which tools ran
 
 ## 11. Proposed Repo Structure
 
+> **As built**, the project is a single flat `src/` package (not a packages/apps
+> monorepo). See the **Structure** section in [README.md](./README.md) for the
+> actual tree, which includes `collectors/{getmongodata,mdiag,mongodlog,ftdc}`,
+> `skills/`, `capacity/`, `risks/`, and `store/` (file + mongo backends incl. the
+> `reports` cache). The original proposal below is kept for historical context.
+
 ```
 ps-agent/
 ├─ packages/
@@ -318,8 +356,15 @@ ps-agent/
 6. ✅ **Scheduler + live updates**: in-process per-source cadence (jitter + overlap guard), SSE event stream, per-source threshold config, live dashboard. (BullMQ/Redis + WebSocket are drop-in alternatives behind the same interfaces.)
 7. ✅ **MCP collector + hardening**: MCP-backed collector (stdio/http), credential encryption at rest (AES-256-GCM), append-only audit log. Remediation remains advisory-only (drafted by the `suggest_remediation` chat tool, never executed).
 8. ✅ **Capacity, bottleneck & cost intelligence** (8a–8d + Ops Manager collector all done) — see §14.
-9. ✅ **Offline mode (getMongoData import)** — see §15.
+9. ✅ **Offline mode** (getMongoData + FTDC + mdiag + **mongod.log** import, unified auto-detect) — see §15.
 10. ✅ **Risk register engine** (expert catalog + deterministic + LLM matching) — see §16.
+11. ✅ **MongoDB agent skills** (vendored official skills, relevance-injected into LLM prompts) — see §17.
+12. ✅ **Cached reports** (persist last capacity/risk report; scan-tied freshness; dashboard auto-display) — see §18.
+
+> Note on the stack: the implementation uses Node's built-in `http` server (not
+> Fastify), SSE (not raw WebSockets), a self-contained dashboard SPA served as a
+> single HTML string (not Next.js), and an in-process scheduler (not BullMQ/Redis).
+> The original choices below remain drop-in alternatives behind the same interfaces.
 
 ---
 
@@ -546,22 +591,24 @@ the user drops a **whole folder** (or multi-selects any mix of files) and the
 agent figures out the rest.
 
 - **Content sniffer** (`src/collectors/detect.ts`): classifies each file by its
-  bytes — `getMongoData` / `mdiag` / `ftdc` / `unknown`. FTDC is identified by its
-  precise binary signature (first BSON doc begins with an `_id` UTC-datetime
-  element — `09 5f 69 64 00`), which cleanly excludes WiredTiger `.wt` and other
-  binaries; the two JSON kinds are told apart by their section vocabulary. Works
-  on a 4 KiB prefix, so multi-GB FTDC is never fully read just to classify.
+  bytes — `getMongoData` / `mdiag` / `ftdc` / `mongodLog` / `unknown`. FTDC is
+  identified by its precise binary signature (first BSON doc begins with an `_id`
+  UTC-datetime element — `09 5f 69 64 00`), which cleanly excludes WiredTiger `.wt`
+  and other binaries; the JSON-array kinds (getMongoData/mdiag) are told apart by
+  their section vocabulary; a **mongod.log** is recognized as NDJSON whose first
+  lines are log-entry objects (`{t,s,c,msg}`). Works on a 4 KiB prefix, so multi-GB
+  FTDC is never fully read just to classify.
 - **`HealthService.importBundle(files[], {name, sourceId})`**: classifies every
   file, then ingests in dependency order — **getMongoData first** (sets the
   cluster source + topology/config), then **mdiag** (per-node OS facts merged onto
-  the cluster scan; no longer requires a prior scan — it bootstraps one if
-  needed), then **FTDC** (per-node metric series, streamed from disk via
-  `importFtdcFiles`). Everything lands in **one cluster source**; nodes stay
-  distinct via per-node `processId` series and per-node provenance. Returns a
-  per-file classification + roll-up (counts, nodes, points) for display.
-- **Node-identity reconciliation** (`src/core/nodeIdentity.ts`): the three sources
+  the cluster scan; bootstraps one if needed), then **mongod.log** (per-node
+  operational signals merged onto the scan), then **FTDC** (per-node metric series,
+  streamed from disk via `importFtdcFiles`). Everything lands in **one cluster
+  source**; nodes stay distinct via per-node `processId` series and per-node
+  provenance. Returns a per-file classification + roll-up (counts, nodes, points).
+- **Node-identity reconciliation** (`src/core/nodeIdentity.ts`): the sources
   name the same box differently — getMongoData member names (`host:port`, usually
-  FQDN), FTDC (`host:port` or bare host), mdiag (bare hostname). A reconciler seeded
+  FQDN), FTDC (`host:port` or bare host), mdiag + mongod.log (bare hostname). A reconciler seeded
   with the authoritative `replSetStatus.members[].name` roster collapses each
   observed id onto its canonical member name (exact → host-match → FQDN/short-host,
   case-insensitive; confident matches only, else the id stays its own node). So the
@@ -583,8 +630,82 @@ agent figures out the rest.
   - CLI: `ps-agent import --dir <folder>` (recurses, skips dbpath noise like
     `*.wt`/journal/lock) — the easiest path for large on-disk bundles. A directory
     passed to `--file` without a type flag is treated the same way.
-- The old typed endpoints/flags (`--mdiag`, `--ftdc`, `/api/sources/*/mdiag|ftdc/import`)
-  remain for scripted/single-file use; the unified path is the default UX.
+- The old typed endpoints/flags (`--mdiag`, `--ftdc`, `--log`,
+  `/api/sources/*/{mdiag,ftdc,log}/import`) remain for scripted/single-file use; the
+  unified path is the default UX.
+
+### 15.7 mongod.log operational signals
+getMongoData/FTDC are point-in-time or metric-only; neither captures *events* that
+happened on a node. A **mongod.log** (structured JSON, 4.4+) does. `parseMongodLog`
+(`src/collectors/mongodlog/parse.ts`) reads the newline-delimited JSON lines
+(`{t,s,c,id,ctx,msg,attr}`) and distils two outputs:
+
+- **`LogFacts`** (on `CollectedFacts.log`): error/fatal/warning counts, process
+  startups & unclean shutdowns, replica-set elections (de-duplicated to the "start"
+  line) & state changes, WiredTiger/storage warnings, assertions, connection churn,
+  slow-query count, covered time window, hostname & version from the startup banner,
+  and the top-N most frequent error messages.
+- **Slow-query lines** → aggregated (reusing `aggregateSlowQueries`, §14.3) into
+  per-namespace `QuerySignal[]` stored on `source.logQuerySignals` (compact,
+  redaction-safe — no query values).
+
+`HealthService.importMongodLog(raw, {sourceId})` enriches the latest scan (or
+bootstraps a standalone offline source) and re-scores. New **`log.*` checks**
+(`src/checks/log.ts`) turn the facts into findings: `log.fatal-errors` (critical),
+`log.error-rate`, `log.frequent-elections`, `log.unclean-shutdown`,
+`log.storage-warnings`. For capacity, `getCapacityReport` falls back to
+`source.logQuerySignals` when a source has no Atlas/OM Performance-Advisor feed, so
+offline clusters get query-bottleneck analysis too. Only the structured JSON format
+is supported (not pre-4.4 plaintext). Channels: dashboard import, CLI
+`ps-agent import --log --file mongod.log [--source <id>]`, `POST
+/api/sources/:id/log/import`, and the unified bundle (auto-detected).
+
+---
+
+## 17. Phase 11 — MongoDB agent skills
+
+The official MongoDB [agent skills](https://github.com/mongodb/agent-skills)
+(Apache-2.0) are **vendored** under `src/skills/catalog/` (copied into `dist/` at
+build) so the deployment-health agent applies the same MongoDB expertise that
+coding agents get.
+
+- **Loader/selector** (`src/skills/index.ts`): a dependency-free parser reads each
+  `SKILL.md`'s YAML frontmatter (`name`, `description`) and body, builds a registry,
+  and for a given context selects the most relevant skill(s) by token overlap
+  (`selectSkills`), then renders their guidance into a system-prompt fragment
+  (`renderSkillsPrompt`). Best-effort: returns "" when nothing is relevant.
+- **Injection points** (all place skills **after** the grounding rules so
+  "don't invent facts" wins):
+  - **Scan narration** (`correlate.ts`) — context = the findings.
+  - **Chat agent** (`chatGraph.ts`) — context = the user's latest question.
+  - **Risk matcher** (`llmMatcher.ts`) — context = the candidate risks.
+- No MCP server or network is required; the catalog is read from disk. If the
+  catalog is missing, injection is simply skipped.
+
+---
+
+## 18. Phase 12 — Cached capacity/risk reports
+
+Capacity and risk-register reports are expensive (live Atlas/OM API calls, metric
+aggregation, and — for risks — an LLM round-trip), so the last report of each kind
+is persisted and reused.
+
+- **Store** (`ReportStore`, `src/store/store.ts`): `FileReportStore`
+  (`~/.ps-agent/reports/<sourceId>_<kind>.json`, atomic writes) or
+  `MongoReportStore` (collection `reports`, `_id = sourceId|kind`, upsert), selected
+  by `createStores()`. A `CachedReport` records `computedAt`, `basedOnScanAt`, and
+  the report payload.
+- **Freshness is tied to the latest scan.** `getCapacityReport`/`getRiskReport`
+  gained options: default (serve cache if its `basedOnScanAt` equals the current
+  latest scan, else recompute + re-cache), `{refresh:true}` (force recompute), and
+  `{cachedOnly:true}` (return the cached report or `null`, never compute). Responses
+  carry `cached` + `cachedAt` metadata. The cache is cleared on source removal.
+- **API:** `GET /api/sources/:id/{capacity,risks}` supports `?refresh=1` and
+  `?cachedOnly=1` (→ `204` when nothing is cached).
+- **Dashboard:** opening a deployment auto-loads the cached report (`?cachedOnly=1`);
+  if present it renders instantly with a *"Last computed …"* line + **Refresh**
+  button, otherwise a **Compute now** button (so expensive work is never triggered
+  silently on open).
 
 ---
 
@@ -729,6 +850,10 @@ need the admin API.
 
 ## 13. Risks / Open Questions
 - Atlas API rate limits for large fleets → cache + batch + backoff.
-- Self-managed metric *trends* require sampling (no built-in TSDB) → interval collector + TTL store, or integrate Prometheus if present.
+- Self-managed metric *trends*: addressed via **FTDC import** (offline, §15.5) and
+  the **Ops Manager** collector (§14); live direct/MCP sources still accumulate
+  trends from each scheduled scan into `metric_series`.
 - Health-score weighting needs tuning with real deployments.
 - Multi-tenant credential isolation if this becomes a hosted product.
+- mongod.log parsing supports the structured JSON format only; pre-4.4 plaintext
+  logs would need a separate line parser (future).

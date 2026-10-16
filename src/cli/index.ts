@@ -124,8 +124,8 @@ function usage(): void {
       "Offline (isolated clusters):",
       "  ps-agent import --dir <folder> [--name <n>] [--source <id>] [--json]",
       "    Import a WHOLE FOLDER of diagnostics at once — any mix of getMongoData,",
-      "    mdiag, and FTDC files across multiple nodes. Each file is auto-detected by",
-      "    content and ingested into a single deployment. This is the easiest path.",
+      "    mdiag, FTDC, and mongod.log files across multiple nodes. Each file is",
+      "    auto-detected by content and ingested into a single deployment. Easiest path.",
       "  ps-agent import --file getMongoData.log [--name <n>] [--json]",
       "    Import a MongoDB getMongoData.js export (no connection needed).",
       "    (A directory given to --file without a type flag is treated like --dir.)",
@@ -139,6 +139,10 @@ function usage(): void {
       "    Files are read in place and streamed one at a time (bounded memory); the",
       "    raw GBs are NOT copied into the store — only the extracted series are kept.",
       "    --source attaches the metrics to an existing deployment.",
+      "  ps-agent import --log --file mongod.log [--source <id>]",
+      "    Import a mongod.log (structured JSON, 4.4+): errors, elections, restarts,",
+      "    storage warnings, assertions, and slow-query signals. --source attaches the",
+      "    log signals to an existing deployment.",
       "",
     ].join("\n") + "\n",
   );
@@ -224,6 +228,7 @@ async function runImport(argv: string[]): Promise<void> {
   let sourceId: string | undefined;
   let mdiag = false;
   let ftdc = false;
+  let log = false;
   let json = false;
   let noColor = false;
   for (let i = 0; i < argv.length; i++) {
@@ -233,6 +238,7 @@ async function runImport(argv: string[]): Promise<void> {
     else if (argv[i] === "--source") sourceId = argv[++i];
     else if (argv[i] === "--mdiag") mdiag = true;
     else if (argv[i] === "--ftdc") ftdc = true;
+    else if (argv[i] === "--log") log = true;
     else if (argv[i] === "--json") json = true;
     else if (argv[i] === "--no-color") noColor = true;
     else if (argv[i] && !argv[i]!.startsWith("--") && !file) file = argv[i];
@@ -240,8 +246,8 @@ async function runImport(argv: string[]): Promise<void> {
 
   // Unified bundle import: point at a folder (or a single file is auto-routed
   // when no explicit type flag is given). Auto-detects getMongoData / mdiag /
-  // FTDC and ingests everything into one cluster source.
-  const bundleTarget = dir ?? (!mdiag && !ftdc && file && (await isDirectory(file)) ? file : undefined);
+  // FTDC / mongod.log and ingests everything into one cluster source.
+  const bundleTarget = dir ?? (!mdiag && !ftdc && !log && file && (await isDirectory(file)) ? file : undefined);
   if (bundleTarget) {
     try {
       const paths = await collectFiles(bundleTarget);
@@ -264,7 +270,7 @@ async function runImport(argv: string[]): Promise<void> {
   }
 
   if (!file) {
-    process.stderr.write("Error: provide --dir <folder> (auto-detect), or --file <getMongoData.log | mdiag.json | diagnostic.data | metrics.*>\n");
+    process.stderr.write("Error: provide --dir <folder> (auto-detect), or --file <getMongoData.log | mdiag.json | diagnostic.data | metrics.* | mongod.log>\n");
     process.exit(2);
   }
 
@@ -314,7 +320,9 @@ async function runImport(argv: string[]): Promise<void> {
     const svc = new HealthService();
     const scan = mdiag
       ? await svc.importMdiag(raw, { name, sourceId })
-      : await svc.importGetMongoData(raw, { name, sourceId });
+      : log
+        ? await svc.importMongodLog(raw, { name, sourceId })
+        : await svc.importGetMongoData(raw, { name, sourceId });
     const useColor = !noColor && process.stdout.isTTY === true;
     process.stdout.write(json ? formatJson(scan) + "\n" : formatScan(scan, useColor));
   } catch (err) {
@@ -393,7 +401,7 @@ async function collectFiles(root: string): Promise<string[]> {
 function formatBundle(r: {
   sourceName: string;
   score: number;
-  counts: { getMongoData: number; mdiag: number; ftdc: number; unknown: number };
+  counts: { getMongoData: number; mdiag: number; ftdc: number; mongodLog: number; unknown: number };
   nodes: string[];
   metricPointsAdded: number;
   seriesCount: number;
@@ -405,7 +413,8 @@ function formatBundle(r: {
   lines.push(`  Imported into deployment: ${r.sourceName}   (health ${r.score}/100)`);
   lines.push(
     `  Files: ${r.counts.getMongoData} getMongoData · ${r.counts.mdiag} mdiag · ` +
-      `${r.counts.ftdc} FTDC` + (r.counts.unknown ? ` · ${r.counts.unknown} unrecognized` : ""),
+      `${r.counts.ftdc} FTDC · ${r.counts.mongodLog} mongod.log` +
+      (r.counts.unknown ? ` · ${r.counts.unknown} unrecognized` : ""),
   );
   if (r.nodes.length) lines.push(`  Nodes: ${r.nodes.join(", ")}`);
   if (r.seriesCount) lines.push(`  FTDC: ${r.seriesCount} series, ${r.metricPointsAdded} points ingested`);

@@ -5,6 +5,7 @@ import { runGraphScan, scoreFactsToScan } from "../agent/graphs/healthScanGraph.
 import { parseGetMongoData } from "../collectors/getmongodata/parse.js";
 import { parseMdiag } from "../collectors/mdiag/parse.js";
 import { parseFtdc } from "../collectors/ftdc/parse.js";
+import { parseMongodLog } from "../collectors/mongodlog/parse.js";
 import { detectDiagnostic, looksLikeJsonPrefix, type DiagnosticKind } from "../collectors/detect.js";
 import { createNodeReconciler } from "../core/nodeIdentity.js";
 import { redactSource } from "../store/sourceStore.js";
@@ -56,7 +57,7 @@ export interface BundleImportResult {
   sourceId: string;
   sourceName: string;
   score: number;
-  counts: { getMongoData: number; mdiag: number; ftdc: number; unknown: number };
+  counts: { getMongoData: number; mdiag: number; ftdc: number; mongodLog: number; unknown: number };
   nodes: string[];
   metricPointsAdded: number;
   seriesCount: number;
@@ -464,6 +465,87 @@ export class HealthService {
   }
 
   /**
+   * Import a MongoDB `mongod.log` file (structured JSON, 4.4+). Distills the log
+   * into operational signals (errors, elections, restarts, storage warnings,
+   * assertions, connection churn) stored as `log` facts — surfaced by the
+   * `log.*` checks — plus slow-query lines kept on the source for offline
+   * capacity analysis. Mirrors `importMdiag`: enrich the latest scan when a
+   * sourceId is given, otherwise bootstrap a standalone offline source.
+   */
+  async importMongodLog(
+    raw: string,
+    opts: { name?: string; sourceId?: string } = {},
+  ): Promise<ScanResult> {
+    const parsed = parseMongodLog(raw); // throws if not a recognized mongod.log
+    const log = parsed.log;
+
+    // Aggregate slow-query lines into compact, redaction-safe per-namespace
+    // signals and persist them on the source so offline capacity analysis can
+    // surface query bottlenecks (the capacity report reads source.logQuerySignals).
+    const signals =
+      parsed.slowQueryLines.length > 0 ? aggregateSlowQueries(parsed.slowQueryLines) : [];
+    const persistSignals = async (source: Source): Promise<Source> => {
+      if (signals.length === 0) return source;
+      const updated: Source = { ...source, logQuerySignals: signals };
+      await this.sources.upsert(updated);
+      return updated;
+    };
+
+    if (opts.sourceId) {
+      let source = await this.sources.get(opts.sourceId);
+      if (!source) throw new Error(`Source ${opts.sourceId} not found`);
+      source = await persistSignals(source);
+      const metas = await this.scans.listScans(opts.sourceId);
+      const latest = metas[0] ? await this.scans.getScan(metas[0].id) : null;
+      const facts = latest
+        ? { ...latest.facts, log }
+        : {
+            sourceId: source.id,
+            sourceName: source.name,
+            collectedAt: new Date(),
+            topology: { type: "standalone" as const, mongoVersion: log.mongoVersion ?? "unknown", nodeCount: 1 },
+            log,
+            collectionMethod: "offline" as const,
+            warnings: ["mongod.log attached before any MongoDB snapshot: log signals only."],
+          };
+      const scan = scoreFactsToScan(source, facts);
+      await this.scans.saveScan(scan);
+      await this.audit.record({
+        action: "scan.run",
+        sourceId: source.id,
+        detail: { mongodLog: true, score: scan.score.value, findings: scan.findings.length },
+      });
+      return scan;
+    }
+
+    // Standalone: a new offline source carrying only log facts.
+    const source: Source = {
+      id: randomUUID(),
+      name: opts.name ?? log.hostname ?? "mongod-log-import",
+      kind: "offline",
+    };
+    await this.sources.upsert(source);
+    await this.audit.record({
+      action: "source.register",
+      sourceId: source.id,
+      detail: { name: source.name, kind: "offline", mongodLog: true },
+    });
+    await persistSignals({ ...source });
+    const facts = {
+      sourceId: source.id,
+      sourceName: source.name,
+      collectedAt: new Date(),
+      topology: { type: "standalone" as const, mongoVersion: log.mongoVersion ?? "unknown", nodeCount: 1 },
+      log,
+      collectionMethod: "offline" as const,
+      warnings: ["mongod.log-only import: log signals only (no MongoDB serverStatus)."],
+    };
+    const scan = scoreFactsToScan(source, facts);
+    await this.scans.saveScan(scan);
+    return scan;
+  }
+
+  /**
    * Import MongoDB FTDC (`diagnostic.data/metrics.*`) binary archive files. This
    * is the OFFLINE equivalent of the Atlas/OpsManager metrics API: FTDC is the
    * only way to obtain real CPU/memory/disk/IOPS trends from a network-isolated
@@ -790,11 +872,12 @@ export class HealthService {
     const gmd = classified.filter((c) => c.kind === "getMongoData");
     const mdiag = classified.filter((c) => c.kind === "mdiag");
     const ftdc = classified.filter((c) => c.kind === "ftdc");
+    const mongodLog = classified.filter((c) => c.kind === "mongodLog");
     const unknown = classified.filter((c) => c.kind === "unknown");
 
-    if (gmd.length + mdiag.length + ftdc.length === 0) {
+    if (gmd.length + mdiag.length + ftdc.length + mongodLog.length === 0) {
       throw new Error(
-        "None of the files were recognized as getMongoData, mdiag, or FTDC diagnostics.",
+        "None of the files were recognized as getMongoData, mdiag, FTDC, or mongod.log diagnostics.",
       );
     }
 
@@ -820,9 +903,9 @@ export class HealthService {
       }
     }
 
-    // If no getMongoData but we have mdiag/ftdc, make sure a source exists so the
-    // node-level data has somewhere to land.
-    if (!sourceId && (mdiag.length || ftdc.length)) {
+    // If no getMongoData but we have mdiag/ftdc/mongod.log, make sure a source
+    // exists so the node-level data has somewhere to land.
+    if (!sourceId && (mdiag.length || ftdc.length || mongodLog.length)) {
       const source: Source = {
         id: randomUUID(),
         name: opts.name ?? "diagnostic-import",
@@ -850,7 +933,20 @@ export class HealthService {
       }
     }
 
-    // --- 3) FTDC: per-node metrics. Stream path-based files; buffer the rest ---
+    // --- 3) mongod.log: per-node operational signals (merged onto the scan) ---
+    for (const c of mongodLog) {
+      try {
+        const raw = (c.buf ?? (await readFile(c.path!))).toString("utf8");
+        const scan = await this.importMongodLog(raw, { sourceId });
+        sourceId = scan.sourceId;
+        lastScan = scan;
+        if (scan.facts.log?.hostname) reconciler.add(scan.facts.log.hostname);
+      } catch (err) {
+        warnings.push(`mongod.log ${c.filename}: ${(err as Error).message}`);
+      }
+    }
+
+    // --- 4) FTDC: per-node metrics. Stream path-based files; buffer the rest ---
     let metricPointsAdded = 0;
     let seriesCount = 0;
     const ftdcPaths = ftdc.filter((c) => c.path).map((c) => c.path!);
@@ -891,6 +987,7 @@ export class HealthService {
         getMongoData: gmd.length,
         mdiag: mdiag.length,
         ftdc: ftdc.length,
+        mongodLog: mongodLog.length,
         unknown: unknown.length,
       },
       nodes: reconciler.list(),
@@ -1030,6 +1127,11 @@ export class HealthService {
       } catch {
         /* non-fatal */
       }
+    }
+    // Offline sources get query signals from an imported mongod.log instead
+    // (aggregated at import time; see importMongodLog).
+    if ((!querySignals || querySignals.length === 0) && source?.logQuerySignals?.length) {
+      querySignals = source.logQuerySignals;
     }
     return computeCapacityReport({
       spec,
