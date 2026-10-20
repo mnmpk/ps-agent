@@ -47,6 +47,33 @@ Recent additions:
 - **mongod.log collector** — parses the structured JSON log (4.4+) into
   operational signals (errors, elections, restarts, storage warnings, assertions,
   slow queries) surfaced as `log.*` findings.
+- **Deployment model** — every deployment is classified **Atlas** or **on-prem**;
+  you add whatever inputs are available and each one just unlocks more
+  scans/metrics. The detail page shows what's missing + the consequence and lets
+  you supplement.
+
+## Deployments & data availability
+
+A deployment is classified by **how it's hosted**, and you attach whatever inputs
+you have. The available inputs — not a single "type" — decide which scans,
+metrics, and analyses can run.
+
+| Input | Atlas | On-prem | Unlocks |
+|---|:--:|:--:|---|
+| Connection string | ✓ | ✓ | Live deep health checks (replication, tickets, cache, indexes) |
+| MCP connection | ✓ | ✓ | Live scan via MCP (+ data-layer facts) |
+| Atlas Admin API | ✓ | — | Metric trends, tier limits, alerts, Performance Advisor slow queries |
+| Ops Manager Admin API | — | ✓ | Metric trends + slow-query logs (no tier limits) |
+| FTDC | — | ✓ | Offline capacity trends (growth, days-until-full) |
+| getMongoData | — | ✓ | Offline config/status/index/storage snapshot |
+| mdiag | — | ✓ | OS/kernel risk checks (swappiness, THP, ulimits, SELinux, NUMA) |
+| mongod.log | ✓ | ✓ | Log signals (errors/elections/restarts) + offline slow-query analysis |
+
+All inputs are optional and additive — a deployment can start with just an import
+and get a connection string later (or vice-versa). The **detail page → Data
+availability** panel lists what's attached, what's missing, the consequence of each
+gap (e.g. *"no mongod.log → no slow-query analysis"*), and a **supplement** action
+(import a file, or add API credentials via `PATCH /api/sources/:id/connectivity`).
 
 ## Security (P7)
 
@@ -479,10 +506,14 @@ ps-agent serve            # http://127.0.0.1:4000
 ps-agent serve --port 8080
 ```
 
-Open the URL, paste a connection string, and click **Add deployment** — it
-registers the source, runs a scan, and shows the score. Tabs: **Fleet**
-(score per deployment) and **Risk inbox** (all findings, worst-first). Click a
-card for cluster detail (topology, findings, LLM analysis).
+Open the URL and click **Add deployment** — pick **Atlas** or **on-prem**, then
+add whatever you have (connection string, MCP, Atlas/Ops Manager API, and/or
+import diagnostic files), and it registers the source, runs a scan, and shows the
+score. Tabs: **Fleet** (score per deployment) and **Risk inbox** (all findings,
+worst-first). Click a card for cluster detail (topology, **data availability**,
+capacity, risk register, findings, LLM analysis). The Data availability panel shows
+what's missing + the consequence and lets you supplement (import a file or add API
+keys) on the spot.
 
 Credentials are redacted in every API response (`admin:***`); the real string
 is kept server-side only to run scans.
@@ -494,7 +525,9 @@ is kept server-side only to run scans.
 | `GET` | `/api/fleet` | Latest scan per source |
 | `GET` | `/api/risks` | Cross-fleet findings (risk inbox) |
 | `GET` | `/api/sources` | Registered sources (redacted) |
-| `POST` | `/api/sources` | Register `{ name, connectionString \| atlas \| mcp \| opsManager }` |
+| `POST` | `/api/sources` | Register `{ name, deployment: "atlas"\|"on-prem", connectionString?, mcp?, atlas?, opsManager? }` (all connectivity optional) |
+| `PATCH` | `/api/sources/:id/connectivity` | Attach/update connectionString / mcp / atlas / opsManager on an existing source |
+| `GET` | `/api/sources/:id/capabilities` | Data availability: inputs present, missing + consequence, derived capabilities |
 | `POST` | `/api/sources/import` | **Unified import**: multipart upload of any mix of getMongoData/mdiag/FTDC/mongod.log → one source |
 | `POST` | `/api/sources/:id/import` | Same, enriching an existing source (multipart) |
 | `POST` | `/api/sources/offline/import` | Import a getMongoData log (raw body) → offline source |
@@ -728,3 +761,11 @@ and may only reference existing findings by `checkId` — it cannot invent metri
 
 Add a new check: create a function and call `register({...})` in a file under
 `src/checks/`, then import it from `src/checks/index.ts`.
+
+### TODO/Bugs
+1. Cannot recognize mdiag output
+2. Disable "add deployment" button after click to avoid multiple add, show upload progress or make it background
+3. monogd.log can be obtained via atlas admin API if upload is missing.
+4. topology graph
+5. metrics charts like x-ray
+6. host/cluster info from FTDC?

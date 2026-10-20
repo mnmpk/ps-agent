@@ -464,7 +464,7 @@ async function main(): Promise<void> {
     source = {
       id: "cli-source",
       name: args.name ?? args.cluster ?? "atlas-project",
-      kind: "atlas",
+      deployment: "atlas",
       atlas: { projectId: group, publicKey, privateKey, clusterName: args.cluster },
     };
   } else {
@@ -479,7 +479,7 @@ async function main(): Promise<void> {
     source = {
       id: "cli-source",
       name: args.name ?? "deployment",
-      kind: "direct",
+      deployment: "on-prem",
       connectionString: uri,
     };
   }

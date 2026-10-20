@@ -24,21 +24,29 @@ export function resolveThresholds(source: Source): Thresholds {
   return { ...DEFAULT_THRESHOLDS, ...source.thresholdOverrides };
 }
 
+/**
+ * Pick a live collector from the source's AVAILABLE inputs (not a single `kind`).
+ * Precedence favors the deepest check:
+ *   - MCP (optionally with a connection string → deep driver + data-layer facts)
+ *   - connection string alone → DirectCollector
+ *   - Atlas Admin API → AtlasCollector
+ *   - Ops Manager Admin API → OpsManagerCollector
+ * A source with none of these is import-only and cannot be scanned live.
+ */
 function collectorFor(source: Source): Collector {
-  switch (source.kind) {
-    case "direct":
-      return new DirectCollector(source);
-    case "atlas":
-      return new AtlasCollector(source);
-    case "mcp":
-      return new McpCollector(source);
-    case "opsmanager":
-      return new OpsManagerCollector(source);
-    case "offline":
-      throw new Error(
-        "Offline sources are updated by importing a getMongoData log, not by scanning.",
-      );
-  }
+  if (source.mcp) return new McpCollector(source);
+  if (source.connectionString) return new DirectCollector(source);
+  if (source.atlas) return new AtlasCollector(source);
+  if (source.opsManager) return new OpsManagerCollector(source);
+  throw new Error(
+    "This deployment has no live connection (connection string / MCP / Atlas / Ops Manager API). " +
+      "Import diagnostics (getMongoData / FTDC / mdiag / mongod.log) instead.",
+  );
+}
+
+/** Whether a source has any input that supports a live scan. */
+export function canScanLive(source: Source): boolean {
+  return !!(source.mcp || source.connectionString || source.atlas || source.opsManager);
 }
 
 // --- nodes -----------------------------------------------------------------

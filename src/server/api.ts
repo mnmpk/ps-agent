@@ -306,49 +306,45 @@ async function handle(
     if (!body?.name) {
       return sendJson(res, 400, { error: "name is required" });
     }
-    const hasAtlas =
-      body.atlas?.projectId && body.atlas?.publicKey && body.atlas?.privateKey;
-    const hasMcp = body.mcp?.transport && (body.mcp?.command || body.mcp?.url);
-    const hasOm =
-      body.opsManager?.baseUrl &&
-      body.opsManager?.projectId &&
-      body.opsManager?.publicKey &&
-      body.opsManager?.privateKey;
-    if (!body.connectionString && !hasAtlas && !hasMcp && !hasOm) {
-      return sendJson(res, 400, {
-        error:
-          "provide one of: connectionString, atlas {…}, mcp {…}, or opsManager { baseUrl, projectId, publicKey, privateKey }",
-      });
+    const deployment = body.deployment === "atlas" ? "atlas" : body.deployment === "on-prem" ? "on-prem" : null;
+    if (!deployment) {
+      return sendJson(res, 400, { error: "deployment is required: 'atlas' or 'on-prem'" });
     }
+    const conn = parseConnectivity(body, deployment);
     const source = await service.registerSource({
       name: String(body.name),
-      connectionString: body.connectionString ? String(body.connectionString) : undefined,
-      atlas: hasAtlas
-        ? {
-            projectId: String(body.atlas.projectId),
-            publicKey: String(body.atlas.publicKey),
-            privateKey: String(body.atlas.privateKey),
-            clusterName: body.atlas.clusterName ? String(body.atlas.clusterName) : undefined,
-          }
-        : undefined,
-      mcp: hasMcp
-        ? {
-            transport: body.mcp.transport === "http" ? "http" : "stdio",
-            command: body.mcp.command ? String(body.mcp.command) : undefined,
-            url: body.mcp.url ? String(body.mcp.url) : undefined,
-          }
-        : undefined,
-      opsManager: hasOm
-        ? {
-            baseUrl: String(body.opsManager.baseUrl),
-            projectId: String(body.opsManager.projectId),
-            publicKey: String(body.opsManager.publicKey),
-            privateKey: String(body.opsManager.privateKey),
-          }
-        : undefined,
+      deployment,
+      ...conn,
       tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
     });
     return sendJson(res, 201, source);
+  }
+
+  // Attach/update connectivity on an existing source (supplement from detail page).
+  const sourceAttach = path.match(/^\/api\/sources\/([^/]+)\/connectivity$/);
+  if (method === "PATCH" && sourceAttach) {
+    const id = decodeURIComponent(sourceAttach[1]!);
+    const body = await readJsonBody(req);
+    try {
+      const existing = (await service.listSources()).find((s) => s.id === id);
+      const deployment = existing?.deployment ?? "on-prem";
+      const conn = parseConnectivity(body ?? {}, deployment);
+      const source = await service.attachConnectivity(id, conn);
+      return sendJson(res, 200, source);
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
+  }
+
+  // Data-availability + capability picture for a source (detail page).
+  const sourceCapabilities = path.match(/^\/api\/sources\/([^/]+)\/capabilities$/);
+  if (method === "GET" && sourceCapabilities) {
+    const id = decodeURIComponent(sourceCapabilities[1]!);
+    try {
+      return sendJson(res, 200, await service.getAvailability(id));
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
   }
 
   if (method === "GET" && path === "/api/audit") {
@@ -483,6 +479,56 @@ async function handle(
   }
 
   sendJson(res, 404, { error: `No route for ${method} ${path}` });
+}
+
+/**
+ * Parse the connectivity blocks from a request body, keeping only those valid for
+ * the deployment type (Atlas API only for Atlas; Ops Manager only for on-prem).
+ */
+function parseConnectivity(
+  body: any,
+  deployment: "atlas" | "on-prem",
+): {
+  connectionString?: string;
+  atlas?: { projectId: string; publicKey: string; privateKey: string; clusterName?: string };
+  mcp?: { transport: "stdio" | "http"; command?: string; url?: string };
+  opsManager?: { baseUrl: string; projectId: string; publicKey: string; privateKey: string };
+} {
+  const hasAtlas = body.atlas?.projectId && body.atlas?.publicKey && body.atlas?.privateKey;
+  const hasMcp = body.mcp?.transport && (body.mcp?.command || body.mcp?.url);
+  const hasOm =
+    body.opsManager?.baseUrl &&
+    body.opsManager?.projectId &&
+    body.opsManager?.publicKey &&
+    body.opsManager?.privateKey;
+  return {
+    connectionString: body.connectionString ? String(body.connectionString) : undefined,
+    atlas:
+      hasAtlas && deployment === "atlas"
+        ? {
+            projectId: String(body.atlas.projectId),
+            publicKey: String(body.atlas.publicKey),
+            privateKey: String(body.atlas.privateKey),
+            clusterName: body.atlas.clusterName ? String(body.atlas.clusterName) : undefined,
+          }
+        : undefined,
+    mcp: hasMcp
+      ? {
+          transport: body.mcp.transport === "http" ? "http" : "stdio",
+          command: body.mcp.command ? String(body.mcp.command) : undefined,
+          url: body.mcp.url ? String(body.mcp.url) : undefined,
+        }
+      : undefined,
+    opsManager:
+      hasOm && deployment === "on-prem"
+        ? {
+            baseUrl: String(body.opsManager.baseUrl),
+            projectId: String(body.opsManager.projectId),
+            publicKey: String(body.opsManager.publicKey),
+            privateKey: String(body.opsManager.privateKey),
+          }
+        : undefined,
+  };
 }
 
 /** Treats ?param=1|true|yes (case-insensitive) as true; anything else false. */

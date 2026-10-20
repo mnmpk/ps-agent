@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import type { Source } from "../core/source.js";
+import type { Source, Deployment } from "../core/source.js";
 import type { ScanResult, CollectedFacts } from "../core/types.js";
-import { runGraphScan, scoreFactsToScan } from "../agent/graphs/healthScanGraph.js";
+import { availabilityOf, type Availability } from "../core/capabilities.js";
+import { runGraphScan, scoreFactsToScan, canScanLive } from "../agent/graphs/healthScanGraph.js";
 import { parseGetMongoData } from "../collectors/getmongodata/parse.js";
 import { parseMdiag } from "../collectors/mdiag/parse.js";
 import { parseFtdc } from "../collectors/ftdc/parse.js";
@@ -139,7 +140,7 @@ function rankRisk(a: RiskAssessment): number {
 
 export interface RegisterSourceInput {
   name: string;
-  kind?: Source["kind"];
+  deployment: Deployment;
   connectionString?: string;
   atlas?: {
     projectId: string;
@@ -159,6 +160,28 @@ export interface RegisterSourceInput {
     privateKey: string;
   };
   tags?: string[];
+}
+
+/** Connectivity that can be attached/updated on an existing source. */
+export interface ConnectivityInput {
+  connectionString?: string;
+  atlas?: {
+    projectId: string;
+    publicKey: string;
+    privateKey: string;
+    clusterName?: string;
+  };
+  mcp?: {
+    transport: "stdio" | "http";
+    command?: string;
+    url?: string;
+  };
+  opsManager?: {
+    baseUrl: string;
+    projectId: string;
+    publicKey: string;
+    privateKey: string;
+  };
 }
 
 /**
@@ -323,44 +346,94 @@ export class HealthService {
   }
 
   async registerSource(input: RegisterSourceInput): Promise<Source> {
-    // Primary kind is the collection method. An attached `atlas` key on a
-    // direct/MCP source is only for trends/capacity, so connectionString/mcp
-    // take precedence when deciding the kind.
-    const kind =
-      input.kind ??
-      (input.connectionString
-        ? "direct"
-        : input.mcp
-          ? "mcp"
-          : input.atlas
-            ? "atlas"
-            : input.opsManager
-              ? "opsmanager"
-              : "direct");
+    // A deployment keeps whatever inputs are provided; the available inputs (not a
+    // single collection-method enum) gate which scans/metrics can run later.
     const source: Source = {
       id: randomUUID(),
       name: input.name,
-      kind,
+      deployment: input.deployment,
       connectionString: input.connectionString,
-      atlas: input.atlas,
+      atlas: input.deployment === "atlas" ? input.atlas : undefined,
       mcp: input.mcp,
-      opsManager: input.opsManager,
+      opsManager: input.deployment === "on-prem" ? input.opsManager : undefined,
       tags: input.tags,
     };
     const saved = await this.sources.upsert(source);
     await this.audit.record({
       action: "source.register",
       sourceId: saved.id,
-      detail: { name: saved.name, kind: saved.kind },
+      detail: { name: saved.name, deployment: saved.deployment },
     });
     return redactSource(saved);
   }
 
   /**
+   * Attach or update connectivity (connection string / MCP / Atlas or Ops Manager
+   * API) on an existing source — the "supplement" path from the detail page.
+   * Atlas-only inputs are rejected for on-prem deployments and vice-versa. Secrets
+   * are re-encrypted at rest by the store. Returns the redacted source.
+   */
+  async attachConnectivity(id: string, input: ConnectivityInput): Promise<Source> {
+    const source = await this.sources.get(id);
+    if (!source) throw new Error(`Source ${id} not found`);
+    if (input.atlas && source.deployment !== "atlas") {
+      throw new Error("Atlas Admin API is only valid for Atlas deployments.");
+    }
+    if (input.opsManager && source.deployment !== "on-prem") {
+      throw new Error("Ops Manager Admin API is only valid for on-prem deployments.");
+    }
+    const updated: Source = {
+      ...source,
+      connectionString: input.connectionString ?? source.connectionString,
+      mcp: input.mcp ?? source.mcp,
+      atlas: input.atlas ?? source.atlas,
+      opsManager: input.opsManager ?? source.opsManager,
+    };
+    const saved = await this.sources.upsert(updated);
+    await this.audit.record({
+      action: "source.config",
+      sourceId: id,
+      detail: {
+        attached: Object.keys(input).filter((k) => (input as Record<string, unknown>)[k]),
+      },
+    });
+    // New connectivity may unlock history/capacity — kick a backfill (best-effort).
+    void this.collectAndStoreHistory(saved).catch(() => undefined);
+    return redactSource(saved);
+  }
+
+  /**
+   * Compute the data-availability + capability picture for a source: which inputs
+   * it has, what's missing, and the consequence of each gap. Powers the detail
+   * page's "data availability" section. Uses the full (non-redacted) source for
+   * presence checks; it returns only booleans/labels, never secrets.
+   */
+  async getAvailability(id: string): Promise<Availability> {
+    const source = await this.sources.get(id);
+    if (!source) throw new Error(`Source ${id} not found`);
+    const metas = await this.scans.listScans(id);
+    const latest = metas[0] ? await this.scans.getScan(metas[0].id) : null;
+    const series = await this.metrics.listMetrics(id).catch(() => [] as string[]);
+    return availabilityOf(source, latest?.facts ?? null, series.length > 0);
+  }
+
+  /** Record that a file diagnostic was imported (for the availability view). */
+  private markAttachment(
+    source: Source,
+    kind: "getMongoData" | "mdiag" | "mongodLog",
+  ): Source {
+    const at = new Date().toISOString();
+    return {
+      ...source,
+      attachments: { ...source.attachments, [kind]: { at } },
+    };
+  }
+
+  /**
    * Import a getMongoData.js log (for isolated clusters the agent can't reach).
-   * Parses the export into facts, creates/updates an `offline` source, runs the
-   * rule engine, and persists a scan snapshot. If `sourceId` is given, updates
-   * that existing offline source; otherwise registers a new one.
+   * Parses the export into facts, creates/updates the deployment, runs the rule
+   * engine, and persists a scan snapshot. If `sourceId` is given, updates that
+   * existing source; otherwise registers a new on-prem one.
    */
   async importGetMongoData(
     raw: string,
@@ -371,16 +444,17 @@ export class HealthService {
     if (!source) {
       source = {
         id: opts.sourceId ?? randomUUID(),
-        name: opts.name ?? parsed.host ?? "offline-import",
-        kind: "offline",
+        name: opts.name ?? parsed.host ?? "imported-deployment",
+        deployment: "on-prem", // getMongoData is an on-prem diagnostic
       };
-      await this.sources.upsert(source);
       await this.audit.record({
         action: "source.register",
         sourceId: source.id,
-        detail: { name: source.name, kind: "offline" },
+        detail: { name: source.name, deployment: "on-prem" },
       });
     }
+    source = this.markAttachment(source, "getMongoData");
+    await this.sources.upsert(source);
     const facts = {
       ...parsed.facts,
       sourceId: source.id,
@@ -413,8 +487,10 @@ export class HealthService {
     // if the source has no scan yet, bootstrap a minimal one (no hard dependency
     // on importing getMongoData first).
     if (opts.sourceId) {
-      const source = await this.sources.get(opts.sourceId);
+      let source = await this.sources.get(opts.sourceId);
       if (!source) throw new Error(`Source ${opts.sourceId} not found`);
+      source = this.markAttachment(source, "mdiag");
+      await this.sources.upsert(source);
       const metas = await this.scans.listScans(opts.sourceId);
       const latest = metas[0] ? await this.scans.getScan(metas[0].id) : null;
       const facts = latest
@@ -438,17 +514,18 @@ export class HealthService {
       return scan;
     }
 
-    // Standalone: a new offline source carrying only OS facts.
-    const source: Source = {
+    // Standalone: a new on-prem source carrying only OS facts.
+    let source: Source = {
       id: randomUUID(),
       name: opts.name ?? os.mdiagRef ?? "mdiag-import",
-      kind: "offline",
+      deployment: "on-prem",
     };
+    source = this.markAttachment(source, "mdiag");
     await this.sources.upsert(source);
     await this.audit.record({
       action: "source.register",
       sourceId: source.id,
-      detail: { name: source.name, kind: "offline", mdiag: true },
+      detail: { name: source.name, deployment: "on-prem", mdiag: true },
     });
     const facts = {
       sourceId: source.id,
@@ -494,7 +571,8 @@ export class HealthService {
     if (opts.sourceId) {
       let source = await this.sources.get(opts.sourceId);
       if (!source) throw new Error(`Source ${opts.sourceId} not found`);
-      source = await persistSignals(source);
+      source = this.markAttachment(await persistSignals(source), "mongodLog");
+      await this.sources.upsert(source);
       const metas = await this.scans.listScans(opts.sourceId);
       const latest = metas[0] ? await this.scans.getScan(metas[0].id) : null;
       const facts = latest
@@ -518,17 +596,20 @@ export class HealthService {
       return scan;
     }
 
-    // Standalone: a new offline source carrying only log facts.
-    const source: Source = {
+    // Standalone: a new on-prem source carrying only log facts (a log-only import
+    // has no Atlas creds; on-prem is the safe superset — re-classify later if
+    // Atlas connectivity is attached).
+    let source: Source = {
       id: randomUUID(),
       name: opts.name ?? log.hostname ?? "mongod-log-import",
-      kind: "offline",
+      deployment: "on-prem",
     };
+    source = this.markAttachment(source, "mongodLog");
     await this.sources.upsert(source);
     await this.audit.record({
       action: "source.register",
       sourceId: source.id,
-      detail: { name: source.name, kind: "offline", mongodLog: true },
+      detail: { name: source.name, deployment: "on-prem", mongodLog: true },
     });
     await persistSignals({ ...source });
     const facts = {
@@ -573,13 +654,13 @@ export class HealthService {
       source = {
         id: opts.sourceId ?? randomUUID(),
         name: opts.name ?? parsed.host ?? "ftdc-import",
-        kind: "offline",
+        deployment: "on-prem", // FTDC is an on-prem diagnostic
       };
       await this.sources.upsert(source);
       await this.audit.record({
         action: "source.register",
         sourceId: source.id,
-        detail: { name: source.name, kind: "offline", ftdc: true },
+        detail: { name: source.name, deployment: "on-prem", ftdc: true },
       });
     }
 
@@ -719,13 +800,13 @@ export class HealthService {
         source = {
           id: opts.sourceId ?? randomUUID(),
           name: opts.name ?? parsed.host ?? "ftdc-import",
-          kind: "offline",
+          deployment: "on-prem",
         };
         await this.sources.upsert(source);
         await this.audit.record({
           action: "source.register",
           sourceId: source.id,
-          detail: { name: source.name, kind: "offline", ftdc: true },
+          detail: { name: source.name, deployment: "on-prem", ftdc: true },
         });
       }
 
@@ -909,13 +990,13 @@ export class HealthService {
       const source: Source = {
         id: randomUUID(),
         name: opts.name ?? "diagnostic-import",
-        kind: "offline",
+        deployment: "on-prem", // these diagnostics are on-prem
       };
       await this.sources.upsert(source);
       await this.audit.record({
         action: "source.register",
         sourceId: source.id,
-        detail: { name: source.name, kind: "offline", bundle: true },
+        detail: { name: source.name, deployment: "on-prem", bundle: true },
       });
       sourceId = source.id;
     }
@@ -1265,12 +1346,15 @@ export class HealthService {
   ): Promise<ScanResult> {
     const source = await this.sources.get(id);
     if (!source) throw new Error(`Source ${id} not found`);
-    // Offline sources can't be collected live — re-score the last import instead.
-    if (source.kind === "offline") {
+    // No live connection → re-score the last import instead of collecting live.
+    if (!canScanLive(source)) {
       const metas = await this.scans.listScans(id);
       const latest = metas[0] ? await this.scans.getScan(metas[0].id) : null;
       if (!latest) {
-        throw new Error("No imported data for this offline source. Import a getMongoData log first.");
+        throw new Error(
+          "No live connection and no imported data for this deployment. " +
+            "Add a connection string / MCP / Atlas / Ops Manager API, or import diagnostics first.",
+        );
       }
       return scoreFactsToScan(source, latest.facts);
     }

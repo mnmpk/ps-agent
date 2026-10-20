@@ -1,20 +1,37 @@
 import { z } from "zod";
 
 /**
- * A registered deployment to monitor. v1 of the CLI supports the "direct"
- * kind (connection string). Atlas/MCP kinds are reserved for later phases
- * but defined here so the schema is stable.
+ * How a deployment is hosted. This is the ONLY hard classification; it decides
+ * which inputs make sense (Atlas has no FTDC/getMongoData/mdiag; on-prem has no
+ * Atlas Admin API). Everything else — which health checks, metrics, and analyses
+ * can run — is derived from the *available inputs* (see capabilitiesOf), not from
+ * a single collection-method enum.
+ *
+ *   atlas   — MongoDB Atlas (cloud). Inputs: connection string, MCP, Atlas Admin
+ *             API, mongod.log.
+ *   on-prem — self-managed (Enterprise/Community). Inputs: connection string, MCP,
+ *             Ops Manager Admin API, FTDC, getMongoData, mdiag, mongod.log.
  */
-export const SourceKind = z.enum(["direct", "atlas", "mcp", "opsmanager", "offline"]);
-export type SourceKind = z.infer<typeof SourceKind>;
+export const Deployment = z.enum(["atlas", "on-prem"]);
+export type Deployment = z.infer<typeof Deployment>;
 
 export const SourceSchema = z.object({
   id: z.string(),
   name: z.string(),
-  kind: SourceKind,
-  // direct
+  /** Hosting classification. */
+  deployment: Deployment,
+  // --- Live connectivity (either type) ---
+  /** Direct driver connection string (stored encrypted at rest). */
   connectionString: z.string().optional(),
-  // atlas (reserved)
+  /** MongoDB MCP server connection. */
+  mcp: z
+    .object({
+      transport: z.enum(["stdio", "http"]),
+      command: z.string().optional(),
+      url: z.string().optional(),
+    })
+    .optional(),
+  // --- Atlas-only admin API ---
   atlas: z
     .object({
       projectId: z.string(),
@@ -23,16 +40,8 @@ export const SourceSchema = z.object({
       clusterName: z.string().optional(),
     })
     .optional(),
-  // mcp (reserved)
-  mcp: z
-    .object({
-      transport: z.enum(["stdio", "http"]),
-      command: z.string().optional(),
-      url: z.string().optional(),
-    })
-    .optional(),
-  // Ops Manager (self-managed) — same metrics/history path as Atlas, different
-  // base URL + API path, and no cluster tier spec.
+  // --- On-prem-only admin API (Ops Manager) ---
+  // Same metrics/history path as Atlas, different base URL + API path, no tier spec.
   opsManager: z
     .object({
       baseUrl: z.string(), // e.g. https://opsmgr.example.com:8080
@@ -94,6 +103,20 @@ export const SourceSchema = z.object({
         example: z.string().optional(),
       }),
     )
+    .optional(),
+  /**
+   * Lightweight attachment markers for the offline file imports whose signal
+   * otherwise lives only inside the latest scan's facts. Lets the data-availability
+   * view (and capabilitiesOf) know what's attached without loading a scan. Each
+   * records when it was last imported. (FTDC has its own richer `ftdcProvenance`;
+   * mongod.log also leaves `logQuerySignals`.)
+   */
+  attachments: z
+    .object({
+      getMongoData: z.object({ at: z.string() }).optional(),
+      mdiag: z.object({ at: z.string() }).optional(),
+      mongodLog: z.object({ at: z.string() }).optional(),
+    })
     .optional(),
   /** Scheduling + threshold overrides for this deployment. */
   schedule: z

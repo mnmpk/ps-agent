@@ -73,6 +73,9 @@ export function renderDashboard(): string {
   .addrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
   .addfields { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .addfields input.uri { flex: 1; min-width: 300px; }
+  .addsection { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 10px; }
+  .addsection-t { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+  .addsection-t .muted { font-weight: 400; }
   .finding { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
   .finding .ftitle { font-weight: 600; display: flex; gap: 8px; align-items: center; }
   .finding .fdetail { color: var(--muted); margin-top: 4px; }
@@ -201,62 +204,64 @@ async function renderFleet() {
   const form = \`
     <div class="addbox">
       <div class="addrow">
-        <input id="name" placeholder="Name" style="width:180px" />
-        <select id="kind" onchange="onKindChange()">
-          <option value="direct">Direct (connection string)</option>
-          <option value="mcp">MCP server</option>
-          <option value="atlas">Atlas API</option>
-          <option value="opsmanager">Ops Manager</option>
-          <option value="offline">Offline (import diagnostics)</option>
+        <input id="name" placeholder="Deployment name" style="width:180px" />
+        <select id="deployment" onchange="onDeploymentChange()">
+          <option value="atlas">Atlas (cloud)</option>
+          <option value="on-prem">On-prem (self-managed)</option>
         </select>
         <button class="action" onclick="addSource()">Add deployment</button>
       </div>
-      <div class="addfields" id="fields-direct">
-        <input class="uri" id="uri" placeholder="mongodb://user:pass@host:27017/" />
-      </div>
-      <div class="addfields" id="fields-mcp" style="display:none">
-        <select id="mcpTransport" onchange="onMcpTransportChange()">
-          <option value="stdio">stdio (spawn command)</option>
-          <option value="http">http (url)</option>
-        </select>
-        <input id="mcpCommand" placeholder="npx -y mongodb-mcp-server" style="flex:1;min-width:240px" />
-        <input id="mcpUrl" placeholder="http://localhost:3000/mcp" style="flex:1;min-width:240px;display:none" />
-        <input class="uri" id="mcpConn" placeholder="mongodb://… (optional, enables deep check)" />
-      </div>
-      <div class="addfields" id="fields-atlas" style="display:none">
-        <input id="atlasGroup" placeholder="Project (group) ID" style="width:200px" />
-        <input id="atlasPub" placeholder="Public key" style="width:160px" />
-        <input id="atlasPriv" placeholder="Private key" style="width:220px" />
-        <input id="atlasCluster" placeholder="Cluster name (optional)" style="width:180px" />
-      </div>
-      <div class="addfields" id="fields-opsmanager" style="display:none">
-        <input id="omUrl" placeholder="https://opsmgr.example.com:8080" style="width:260px" />
-        <input id="omGroup" placeholder="Project (group) ID" style="width:200px" />
-        <input id="omPub" placeholder="Public key" style="width:160px" />
-        <input id="omPriv" placeholder="Private key" style="width:220px" />
-      </div>
-      <div class="addfields" id="fields-offline" style="display:none;flex-direction:column;align-items:flex-start;gap:6px">
-        <input type="file" id="offlineFile" multiple />
-        <label class="muted" style="font-size:12px;cursor:pointer"><input type="checkbox" id="offlineDir" onchange="onOfflineDir()" /> select a whole folder instead</label>
-        <span class="muted" style="font-size:12px">Drop in ANY mix of getMongoData, mdiag, FTDC, and mongod.log files — across multiple nodes. Each file is auto-detected and imported into one deployment.</span>
-      </div>
-      <div id="atlas-extra" style="display:none;margin-top:8px">
-        <label class="muted" style="font-size:12px;cursor:pointer">
-          <input type="checkbox" id="wantTrends" onchange="onWantTrends()" />
-          Add Atlas API key for trends &amp; capacity analysis (growth, bottlenecks, scaling)
-        </label>
-        <div class="addfields" id="fields-trends" style="display:none;margin-top:8px">
-          <input id="tGroup" placeholder="Atlas project (group) ID" style="width:200px" />
-          <input id="tPub" placeholder="Public key" style="width:160px" />
-          <input id="tPriv" placeholder="Private key" style="width:220px" />
-          <input id="tCluster" placeholder="Cluster name" style="width:180px" />
+      <div class="muted" style="font-size:12px;margin-top:2px">Add whatever is available — each input just enables more scans/metrics. You can supplement later from the deployment's detail page.</div>
+
+      <div class="addsection">
+        <div class="addsection-t">Live connection <span class="muted">(optional)</span></div>
+        <div class="addfields">
+          <input class="uri" id="uri" placeholder="Connection string — mongodb://user:pass@host:27017/" />
+        </div>
+        <div class="addfields" style="margin-top:6px">
+          <select id="mcpTransport" onchange="onMcpTransportChange()">
+            <option value="">MCP: none</option>
+            <option value="stdio">MCP: stdio (spawn command)</option>
+            <option value="http">MCP: http (url)</option>
+          </select>
+          <input id="mcpCommand" placeholder="npx -y mongodb-mcp-server" style="flex:1;min-width:240px;display:none" />
+          <input id="mcpUrl" placeholder="http://localhost:3000/mcp" style="flex:1;min-width:240px;display:none" />
         </div>
       </div>
+
+      <div class="addsection" id="sec-atlas">
+        <div class="addsection-t">Atlas Admin API <span class="muted">(optional — unlocks metric trends, tier limits, alerts, Performance Advisor)</span></div>
+        <div class="addfields">
+          <input id="atlasGroup" placeholder="Project (group) ID" style="width:200px" />
+          <input id="atlasPub" placeholder="Public key" style="width:160px" />
+          <input id="atlasPriv" placeholder="Private key" style="width:220px" />
+          <input id="atlasCluster" placeholder="Cluster name (optional)" style="width:180px" />
+        </div>
+      </div>
+
+      <div class="addsection" id="sec-opsmanager" style="display:none">
+        <div class="addsection-t">Ops Manager Admin API <span class="muted">(optional — unlocks metric trends & slow-query logs)</span></div>
+        <div class="addfields">
+          <input id="omUrl" placeholder="https://opsmgr.example.com:8080" style="width:260px" />
+          <input id="omGroup" placeholder="Project (group) ID" style="width:200px" />
+          <input id="omPub" placeholder="Public key" style="width:160px" />
+          <input id="omPriv" placeholder="Private key" style="width:220px" />
+        </div>
+      </div>
+
+      <div class="addsection">
+        <div class="addsection-t">Import diagnostics <span class="muted" id="diag-hint"></span></div>
+        <div class="addfields" style="flex-direction:column;align-items:flex-start;gap:6px">
+          <input type="file" id="offlineFile" multiple />
+          <label class="muted" style="font-size:12px;cursor:pointer"><input type="checkbox" id="offlineDir" onchange="onOfflineDir()" /> select a whole folder instead</label>
+        </div>
+      </div>
+
       <div class="muted" id="addhint" style="font-size:12px;margin-top:4px"></div>
     </div>\`;
   if (fleet.length === 0) {
     el.innerHTML = form + '<div class="empty">No deployments registered yet. Add one above.</div>';
-    onKindChange();
+    onDeploymentChange();
     return;
   }
   const cards = fleet.map(f => {
@@ -274,7 +279,7 @@ async function renderFleet() {
     return \`<div class="card" id="card-\${f.source.id}" onclick="openDetail('\${f.source.id}','\${f.latestScanId||''}')">
       <span class="card-x" title="Deregister" onclick="event.stopPropagation();removeSource('\${f.source.id}','\${esc(f.source.name)}')">✕</span>
       <h3>\${esc(f.source.name)}</h3>
-      <div class="host">\${esc(f.source.connectionString || f.source.kind)}</div>
+      <div class="host">\${esc(f.source.connectionString || (f.source.deployment === 'atlas' ? 'Atlas' : 'On-prem'))}</div>
       \${scoreHtml}\${pills}
       <div class="muted" style="margin-top:10px;font-size:12px">Last scan: <span id="last-\${f.source.id}">\${fmtDate(f.lastScannedAt)}</span></div>
       <div class="sched" onclick="event.stopPropagation()">
@@ -285,7 +290,7 @@ async function renderFleet() {
     </div>\`;
   }).join('');
   el.innerHTML = form + '<div class="cards">' + cards + '</div>';
-  onKindChange();
+  onDeploymentChange();
 }
 
 async function setSchedule(sourceId, seconds) {
@@ -315,95 +320,78 @@ async function scanNow(sourceId, summarize) {
   }
 }
 
-function onKindChange() {
-  const kind = document.getElementById('kind').value;
-  for (const k of ['direct','mcp','atlas','opsmanager','offline']) {
-    document.getElementById('fields-' + k).style.display = (k === kind) ? 'flex' : 'none';
-  }
-  // The "add Atlas API for trends" expander only makes sense for direct/MCP.
-  document.getElementById('atlas-extra').style.display = (kind === 'direct' || kind === 'mcp') ? 'block' : 'none';
-  const hints = {
-    direct: 'Deep driver check (replication, serverStatus, indexes, storage). Add an Atlas API key below for growth/capacity trends.',
-    mcp: 'Scans via a MongoDB MCP server. Add a connection string for a deep "mcp+direct" check, and an Atlas API key below for trends.',
-    atlas: 'Uses the Atlas Admin API (Project Read Only key). Unlocks trends, capacity & bottleneck analysis.',
-    opsmanager: 'Self-managed via Ops Manager Public API (base URL + project ID + API key). Unlocks metrics, trends, capacity & bottlenecks (no cluster-tier limits).',
-    offline: 'For isolated clusters: run MongoDB\\'s getMongoData.js on the node and upload the log here \u2014 no connection needed.',
-  };
-  document.getElementById('addhint').textContent = hints[kind] || '';
+// Show/hide the type-specific sections + set the import hint for the chosen
+// deployment. Atlas has the Atlas Admin API + mongod.log only; on-prem has Ops
+// Manager + the full file-diagnostics set.
+function onDeploymentChange() {
+  const dep = document.getElementById('deployment').value;
+  const atlas = dep === 'atlas';
+  document.getElementById('sec-atlas').style.display = atlas ? 'block' : 'none';
+  document.getElementById('sec-opsmanager').style.display = atlas ? 'none' : 'block';
+  document.getElementById('diag-hint').textContent = atlas
+    ? '(mongod.log only for Atlas)'
+    : '(any mix of getMongoData, mdiag, FTDC, mongod.log — across nodes)';
+  document.getElementById('addhint').textContent = atlas
+    ? 'Atlas deployment. Add a connection string / MCP for live health checks, an Atlas API key for trends & capacity, and/or a mongod.log for log signals & slow queries.'
+    : 'On-prem deployment. Add a connection string / MCP for live checks, Ops Manager API for trends, and/or import getMongoData / FTDC / mdiag / mongod.log diagnostics.';
 }
 function onMcpTransportChange() {
   const t = document.getElementById('mcpTransport').value;
   document.getElementById('mcpCommand').style.display = (t === 'stdio') ? '' : 'none';
   document.getElementById('mcpUrl').style.display = (t === 'http') ? '' : 'none';
 }
-function onWantTrends() {
-  const on = document.getElementById('wantTrends').checked;
-  document.getElementById('fields-trends').style.display = on ? 'flex' : 'none';
-}
 
 function val(id) { const e = document.getElementById(id); return e ? e.value.trim() : ''; }
 
-async function addSource() {
-  const name = val('name') || 'deployment';
-  const kind = document.getElementById('kind').value;
-  let body = { name };
-
-  // Offline: upload ANY mix of diagnostic files (getMongoData/mdiag/FTDC) in one
-  // multipart request; the server auto-detects + ingests into one deployment.
-  if (kind === 'offline') {
-    const fileEl = document.getElementById('offlineFile');
-    const files = fileEl && fileEl.files;
-    if (!files || files.length === 0) return alert('Choose diagnostic files (or a folder) to upload');
-    return importDiagnostics([...files], name !== 'deployment' ? name : undefined);
-  }
-
-  if (kind === 'direct') {
-    const uri = val('uri');
-    if (!uri) return alert('Enter a connection string');
-    body.connectionString = uri;
-  } else if (kind === 'mcp') {
-    const transport = document.getElementById('mcpTransport').value;
+// Assemble whatever connectivity blocks the user filled in (all optional).
+function collectConnectivityBody(deployment) {
+  const body = {};
+  if (val('uri')) body.connectionString = val('uri');
+  const transport = document.getElementById('mcpTransport').value;
+  if (transport) {
     const mcp = { transport };
-    if (transport === 'stdio') {
-      if (!val('mcpCommand')) return alert('Enter the MCP server command');
-      mcp.command = val('mcpCommand');
-    } else {
-      if (!val('mcpUrl')) return alert('Enter the MCP server URL');
-      mcp.url = val('mcpUrl');
-    }
-    body.mcp = mcp;
-    if (val('mcpConn')) body.connectionString = val('mcpConn'); // enables deep check
-  } else if (kind === 'atlas') {
-    if (!val('atlasGroup') || !val('atlasPub') || !val('atlasPriv'))
-      return alert('Atlas needs project ID, public key, and private key');
+    if (transport === 'stdio' && val('mcpCommand')) mcp.command = val('mcpCommand');
+    if (transport === 'http' && val('mcpUrl')) mcp.url = val('mcpUrl');
+    if (mcp.command || mcp.url) body.mcp = mcp;
+  }
+  if (deployment === 'atlas' && val('atlasGroup') && val('atlasPub') && val('atlasPriv')) {
     body.atlas = {
       projectId: val('atlasGroup'), publicKey: val('atlasPub'), privateKey: val('atlasPriv'),
       clusterName: val('atlasCluster') || undefined,
     };
-  } else if (kind === 'opsmanager') {
-    if (!val('omUrl') || !val('omGroup') || !val('omPub') || !val('omPriv'))
-      return alert('Ops Manager needs base URL, project ID, public key, and private key');
+  }
+  if (deployment === 'on-prem' && val('omUrl') && val('omGroup') && val('omPub') && val('omPriv')) {
     body.opsManager = {
       baseUrl: val('omUrl'), projectId: val('omGroup'),
       publicKey: val('omPub'), privateKey: val('omPriv'),
     };
   }
+  return body;
+}
 
-  // Optional Atlas API key attached to a direct/MCP source for trends/capacity.
-  if ((kind === 'direct' || kind === 'mcp') && document.getElementById('wantTrends') && document.getElementById('wantTrends').checked) {
-    if (!val('tGroup') || !val('tPub') || !val('tPriv') || !val('tCluster')) {
-      return alert('Trends need Atlas project ID, public key, private key, AND cluster name (required for capacity limits)');
-    }
-    body.atlas = {
-      projectId: val('tGroup'), publicKey: val('tPub'), privateKey: val('tPriv'),
-      clusterName: val('tCluster'),
-    };
+async function addSource() {
+  const name = val('name') || 'deployment';
+  const deployment = document.getElementById('deployment').value;
+  const conn = collectConnectivityBody(deployment);
+  const fileEl = document.getElementById('offlineFile');
+  const files = fileEl && fileEl.files && fileEl.files.length ? [...fileEl.files] : [];
+
+  // At least one input is required (connectivity or a diagnostic file).
+  if (Object.keys(conn).length === 0 && files.length === 0) {
+    return alert('Add at least one input: a connection string / MCP / Atlas or Ops Manager API, or import a diagnostic file.');
   }
 
   try {
-    const src = await api('/api/sources', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(body) });
-    await api('/api/sources/' + src.id + '/scan?summarize=1', { method:'POST' });
+    // 1) Register the deployment (name + type + any connectivity).
+    const src = await api('/api/sources', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, deployment, ...conn }),
+    });
+    // 2) Import any diagnostic files into it.
+    if (files.length) await importDiagnostics(files, undefined, src.id, true);
+    // 3) Scan if we have a live connection; otherwise the import already produced a scan.
+    const hasLive = conn.connectionString || conn.mcp || conn.atlas || conn.opsManager;
+    if (hasLive) await api('/api/sources/' + src.id + '/scan?summarize=1', { method: 'POST' });
     renderFleet();
   } catch (e) { alert('Failed: ' + e.message); }
 }
@@ -518,6 +506,7 @@ function renderDetail(scan) {
       </div>
     </div>
     \${analysis}
+    <div id="availability-panel"></div>
     <div id="capacity-panel"></div>
     <div id="risk-panel"></div>
     \${storagePanel(scan.facts.storage)}
@@ -525,11 +514,79 @@ function renderDetail(scan) {
     \${findings}\`;
   const roster = (scan.facts.replSetStatus && scan.facts.replSetStatus.members || []).map(m => m.name);
   loadFtdcProvenance(scan.sourceId, roster);
+  // Data availability: what's attached, what's missing, and the consequence.
+  loadAvailability(scan.sourceId);
   // Auto-display the last computed capacity/risk reports if they're cached;
   // otherwise show a button so the user can compute them on demand (these are
   // expensive — Atlas/OpsManager API calls and an LLM round-trip).
   showCapacity(scan.sourceId);
   showRisks(scan.sourceId);
+}
+
+// Load + render the "data availability" panel: available inputs, missing inputs
+// with their consequence, and a supplement action (import a file / add creds).
+async function loadAvailability(sourceId) {
+  const panel = document.getElementById('availability-panel');
+  if (!panel) return;
+  try {
+    const a = await api('/api/sources/' + sourceId + '/capabilities');
+    panel.innerHTML = availabilityPanel(a, sourceId);
+  } catch (e) {
+    panel.innerHTML = '';
+  }
+}
+
+function availabilityPanel(a, sourceId) {
+  const depLabel = a.deployment === 'atlas' ? 'Atlas' : 'On-prem';
+  const avail = (a.available || []).map(i =>
+    '<span class="pill" style="background:rgba(0,180,80,0.12);border-color:var(--green)">✓ ' + esc(i.label)
+    + (i.at ? ' <span class="muted" style="font-size:10px">(' + fmtWhen(i.at) + ')</span>' : '') + '</span>').join(' ');
+  const missing = (a.missing || []).map(m => {
+    const action = m.supplement === 'import'
+      ? '<button class="ghost" style="font-size:11px;padding:2px 8px" onclick="document.getElementById(\\'bundleFile\\').click()">Import…</button>'
+      : '<button class="ghost" style="font-size:11px;padding:2px 8px" onclick="openSupplement(\\'' + esc(sourceId) + '\\')">Add…</button>';
+    return '<div class="finding" style="padding:8px 12px">'
+      + '<div class="ftitle" style="display:flex;justify-content:space-between;align-items:center;gap:8px">'
+      + '<span><span class="badge info">MISSING</span> ' + esc(m.label) + '</span>' + action + '</div>'
+      + '<div class="fdetail">' + esc(m.consequence) + '</div></div>';
+  }).join('');
+  return '<div class="panel" style="margin-bottom:20px">'
+    + '<div style="font-weight:600;margin-bottom:8px">Data availability <span class="muted" style="font-weight:400;font-size:12px">(' + depLabel + ' deployment)</span></div>'
+    + (avail ? '<div style="margin-bottom:' + (missing ? '12px' : '0') + '">' + avail + '</div>' : '')
+    + (missing
+        ? '<div class="muted" style="font-size:12px;margin-bottom:6px">Not attached — and what you\\'re missing:</div>' + missing
+        : '<div class="muted" style="font-size:12px">All applicable inputs attached. 🎉</div>')
+    + '</div>';
+}
+
+// Prompt for Atlas / Ops Manager API creds (or a connection string) and PATCH
+// them onto an existing source via /connectivity.
+async function openSupplement(sourceId) {
+  const cs = prompt('Add connectivity. Paste a connection string, or leave blank to enter API keys:');
+  const body = {};
+  if (cs && cs.trim()) {
+    body.connectionString = cs.trim();
+  } else {
+    // Try Atlas first, then Ops Manager, based on what the user provides.
+    const group = prompt('Atlas/Ops Manager project (group) ID (blank to cancel):');
+    if (!group) return;
+    const pub = prompt('Public key:'); const priv = prompt('Private key:');
+    if (!pub || !priv) return;
+    const omUrl = prompt('Ops Manager base URL (blank if this is Atlas):');
+    if (omUrl && omUrl.trim()) {
+      body.opsManager = { baseUrl: omUrl.trim(), projectId: group, publicKey: pub, privateKey: priv };
+    } else {
+      const cluster = prompt('Atlas cluster name (recommended, for tier limits):') || undefined;
+      body.atlas = { projectId: group, publicKey: pub, privateKey: priv, clusterName: cluster };
+    }
+  }
+  try {
+    await api('/api/sources/' + encodeURIComponent(sourceId) + '/connectivity', {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    await api('/api/sources/' + encodeURIComponent(sourceId) + '/scan?summarize=1', { method: 'POST' }).catch(()=>{});
+    openDetail(sourceId, null);
+  } catch (e) { alert('Failed to attach: ' + e.message); }
 }
 
 // Client-side node-identity reconciliation (mirrors src/core/nodeIdentity.ts) so
@@ -689,36 +746,37 @@ function onOfflineDir() {
  * in one multipart request to the unified import endpoint. If sourceId is given,
  * the files enrich that deployment; otherwise a new one is created.
  */
-async function importDiagnostics(files, name, sourceId) {
+async function importDiagnostics(files, name, sourceId, silent) {
   if (!files || files.length === 0) return;
   const status = sourceId ? document.getElementById('ftdc-status') : null;
   const note = (m) => { if (status) status.textContent = m; };
   note('Uploading ' + files.length + ' file(s)…');
-  try {
-    const fd = new FormData();
-    if (name) fd.append('name', name);
-    for (const f of files) fd.append('files', f, f.name);
-    const base = sourceId ? '/api/sources/' + encodeURIComponent(sourceId) + '/import' : '/api/sources/import';
-    const r = await fetch(base, { method: 'POST', body: fd });
-    if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error || r.statusText);
-    const res = await r.json();
-    const c = res.counts || {};
-    const summary = 'Imported: ' + (c.getMongoData||0) + ' getMongoData · ' + (c.mdiag||0) + ' mdiag · ' + (c.ftdc||0) + ' FTDC · ' + (c.mongodLog||0) + ' mongod.log'
-      + (c.unknown ? ' · ' + c.unknown + ' unrecognized' : '') + ' (' + (res.nodes||[]).length + ' node(s))';
-    if (sourceId) {
-      note(summary + ' — refreshing…');
-      const fleet = await api('/api/fleet');
-      const f = fleet.find(x => x.source.id === res.sourceId);
-      if (f && f.latestScanId) openDetail(res.sourceId, f.latestScanId);
-      else openDetail(res.sourceId, null);
-    } else {
-      alert(summary);
-      renderFleet();
-    }
-    if ((res.warnings||[]).length) console.warn('import warnings:', res.warnings);
-  } catch (e) {
-    if (sourceId) note('Import failed: ' + e.message);
-    else alert('Import failed: ' + e.message);
+  const fd = new FormData();
+  if (name) fd.append('name', name);
+  for (const f of files) fd.append('files', f, f.name);
+  const base = sourceId ? '/api/sources/' + encodeURIComponent(sourceId) + '/import' : '/api/sources/import';
+  const r = await fetch(base, { method: 'POST', body: fd });
+  if (!r.ok) {
+    const msg = (await r.json().catch(()=>({}))).error || r.statusText;
+    if (silent) throw new Error(msg);
+    if (sourceId) { note('Import failed: ' + msg); } else { alert('Import failed: ' + msg); }
+    return;
+  }
+  const res = await r.json();
+  if ((res.warnings||[]).length) console.warn('import warnings:', res.warnings);
+  if (silent) return res; // caller (addSource) drives the next step
+  const c = res.counts || {};
+  const summary = 'Imported: ' + (c.getMongoData||0) + ' getMongoData · ' + (c.mdiag||0) + ' mdiag · ' + (c.ftdc||0) + ' FTDC · ' + (c.mongodLog||0) + ' mongod.log'
+    + (c.unknown ? ' · ' + c.unknown + ' unrecognized' : '') + ' (' + (res.nodes||[]).length + ' node(s))';
+  if (sourceId) {
+    note(summary + ' — refreshing…');
+    const fleet = await api('/api/fleet');
+    const f = fleet.find(x => x.source.id === res.sourceId);
+    if (f && f.latestScanId) openDetail(res.sourceId, f.latestScanId);
+    else openDetail(res.sourceId, null);
+  } else {
+    alert(summary);
+    renderFleet();
   }
 }
 

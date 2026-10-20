@@ -11,17 +11,10 @@ import {
 import { SEVERITY_RANK } from "../core/types.js";
 
 function collectorFor(source: Source): Collector {
-  switch (source.kind) {
-    case "direct":
-      return new DirectCollector(source);
-    case "atlas":
-    case "mcp":
-    case "opsmanager":
-    case "offline":
-      throw new Error(
-        `Legacy runScan supports 'direct' only; use runGraphScan for ${source.kind}.`,
-      );
-  }
+  if (source.connectionString) return new DirectCollector(source);
+  throw new Error(
+    "Legacy runScan supports a direct connection string only; use runGraphScan for other inputs.",
+  );
 }
 
 /**

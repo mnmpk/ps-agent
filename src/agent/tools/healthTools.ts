@@ -18,7 +18,7 @@ export function buildHealthTools(service: HealthService) {
         fleet.map((f) => ({
           sourceId: f.source.id,
           name: f.source.name,
-          kind: f.source.kind,
+          deployment: f.source.deployment,
           score: f.score?.value,
           counts: f.score?.counts,
           lastScannedAt: f.lastScannedAt,

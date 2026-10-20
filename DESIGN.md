@@ -71,36 +71,55 @@ agent to drill into findings. Built with **TypeScript + LangChain + LangGraph**.
 
 ## 3. Connection / Source Abstraction
 
-A deployment is registered as a **Source**. One interface, several backends.
-(The implemented schema lives in `src/core/source.ts`.)
+A deployment is registered as a **Source**. The only hard classification is how
+it's **hosted** (`atlas | on-prem`); everything else — which scans, metrics, and
+analyses can run — is **derived from the available inputs**, not from a single
+collection-method enum. (Implemented schema: `src/core/source.ts`; capability
+model: `src/core/capabilities.ts`.)
 
 ```ts
-type SourceKind = "direct" | "atlas" | "mcp" | "opsmanager" | "offline";
+type Deployment = "atlas" | "on-prem";
 
 interface Source {
   id: string;
   name: string;
-  kind: SourceKind;
-  // direct
+  deployment: Deployment;           // hosting classification (the only hard type)
+  // --- live connectivity (either deployment) ---
   connectionString?: string;        // stored encrypted at rest
-  // atlas
-  atlas?: { projectId: string; publicKey: string; privateKey: string; clusterName?: string };
-  // mcp
   mcp?: { transport: "stdio" | "http"; command?: string; url?: string };
-  // ops manager (self-managed; same metrics path as Atlas)
-  opsManager?: { baseUrl: string; projectId: string; publicKey: string; privateKey: string };
+  // --- admin APIs (one per deployment type) ---
+  atlas?: { projectId: string; publicKey: string; privateKey: string; clusterName?: string }; // atlas only
+  opsManager?: { baseUrl: string; projectId: string; publicKey: string; privateKey: string };  // on-prem only
   tags?: string[];
-  // provenance / derived data attached by offline imports (no raw bytes):
+  // --- import provenance / derived data (no raw bytes) ---
   ftdcProvenance?: {...};            // FTDC ingest events + per-node coverage
   logQuerySignals?: QuerySignal[];   // aggregated slow queries from mongod.log
+  attachments?: { getMongoData?: {at}; mdiag?: {at}; mongodLog?: {at} }; // import markers
   schedule?: { intervalSeconds?: number; enabled: boolean };
   thresholdOverrides?: Record<string, number>;
 }
 ```
 
-> `offline` sources carry no credentials — they are populated by *importing*
-> read-only diagnostics (getMongoData / mdiag / FTDC / mongod.log), not by
-> connecting. They are never scanned by the scheduler.
+**Allowed inputs per deployment** (enforced in the form + API):
+- **Atlas:** connection string, MCP, Atlas Admin API, mongod.log.
+- **On-prem:** connection string, MCP, Ops Manager Admin API, FTDC, getMongoData,
+  mdiag, mongod.log.
+
+All inputs are **optional and additive**. A source with no live input
+(connection string / MCP / Atlas / Ops Manager API) is *import-only*: it can't be
+collected live, so a scan re-scores its last import instead.
+
+**Capability model** (`availabilityOf` in `src/core/capabilities.ts`) is the single
+source of truth for what a source can do. From the present inputs (+ the latest
+scan's facts + whether metric series exist) it derives `Capabilities`
+(`liveScan`, `deepHealthChecks`, `capacityTrends`, `utilizationLimits`,
+`slowQueryAnalysis`, `riskRegister`, `osRiskChecks`, `logSignals`) and, for the
+detail page, the list of **available** inputs and **missing** inputs each paired
+with its *consequence*. Both runtime gating and the dashboard "Data availability"
+panel read from this, so they always agree. Supplementing an existing source
+(adding a connection string / API key) goes through
+`attachConnectivity` (`PATCH /api/sources/:id/connectivity`); importing a file goes
+through the unified importer.
 
 **Online** sources implement a small `Collector` interface that returns a single
 typed facts bundle (`src/collectors/collector.ts`):
@@ -119,6 +138,11 @@ and the optional offline-only `os` (mdiag) and `log` (mongod.log) fact blocks.
 **Offline** inputs are NOT collectors — they are pure parse functions
 (`parseGetMongoData` / `parseMdiag` / `parseFtdc` / `parseMongodLog`) invoked by the
 import flow (§15), which merge their output into `CollectedFacts` and score it.
+
+**Collector selection** (`collectorFor`, `healthScanGraph.ts`) picks from the
+*available* inputs, favoring the deepest check: MCP (optionally with a connection
+string → deep driver + data-layer) → connection string (Direct) → Atlas API →
+Ops Manager API. A source with none is import-only.
 
 - **DirectCollector** — `mongodb` Node driver, `admin` db commands. Needs a user with `clusterMonitor`. Also runs `hostInfo`/`dbStats`/`buildInfo` for RAM/cores/limits.
 - **AtlasCollector** — Atlas Admin API (HTTP Digest). Pulls `/processes`, `/processes/{id}/measurements`, `/alerts`, Performance Advisor suggestions, cluster spec, and N-day history. Respects rate limits (batch + cache).
@@ -360,6 +384,7 @@ ps-agent/
 10. ✅ **Risk register engine** (expert catalog + deterministic + LLM matching) — see §16.
 11. ✅ **MongoDB agent skills** (vendored official skills, relevance-injected into LLM prompts) — see §17.
 12. ✅ **Cached reports** (persist last capacity/risk report; scan-tied freshness; dashboard auto-display) — see §18.
+13. ✅ **Deployment + capability model** (classify atlas/on-prem; additive inputs; derived capabilities; data-availability panel; supplement via `attachConnectivity`) — see §19.
 
 > Note on the stack: the implementation uses Node's built-in `http` server (not
 > Fastify), SSE (not raw WebSockets), a self-contained dashboard SPA served as a
@@ -443,6 +468,12 @@ The committed `risks-catalog.json` is now only the **seed**. A `CatalogStore`
 ---
 
 ## 15. Phase 9 — Offline mode via getMongoData
+
+> **Model note:** this section describes offline mode as originally built (when a
+> dedicated `kind: "offline"` existed). Per §19, there is no longer an "offline"
+> kind — imports now attach to an **on-prem** deployment and are tracked via
+> `attachments` markers; a source with no live connection is simply *import-only*.
+> The import mechanics below are otherwise current.
 
 Most production clusters are network-isolated; the agent can't dial them. The
 MongoDB support script **getMongoData.js** is the canonical read-only diagnostic:
@@ -706,6 +737,40 @@ is persisted and reused.
   if present it renders instantly with a *"Last computed …"* line + **Refresh**
   button, otherwise a **Compute now** button (so expensive work is never triggered
   silently on open).
+
+---
+
+## 19. Phase 13 — Deployment classification + capability model
+
+Previously a single `kind` enum (`direct|atlas|mcp|opsmanager|offline`) conflated
+*hosting*, *collection method*, and *liveness*, forcing a mutually-exclusive form
+and a `switch`-based collector dispatch. This phase replaces it with a hosting
+classification plus a derived capability model.
+
+- **`deployment: "atlas" | "on-prem"`** is the only hard type. Allowed inputs per
+  type (`ALLOWED_INPUTS`): Atlas → connection string, MCP, Atlas Admin API,
+  mongod.log; on-prem → those (OM instead of Atlas) plus FTDC, getMongoData, mdiag.
+  All optional and additive.
+- **`src/core/capabilities.ts`** (`availabilityOf`) is the single source of truth:
+  from the present inputs + latest-scan facts + whether metric series exist, it
+  derives `Capabilities` and the available/missing input lists (each missing one
+  paired with its consequence). Runtime gating and the UI both read it.
+- **Collector dispatch** (`collectorFor`) now selects from available inputs
+  (MCP → Direct → Atlas → Ops Manager); `canScanLive(source)` replaces the
+  `kind === "offline"` test. Import-only sources re-score their last import.
+- **Registration & imports** set `deployment` (imports default to on-prem and record
+  an `attachments` marker). `registerSource` keeps all provided inputs; no kind
+  precedence collapse.
+- **Supplement path:** `attachConnectivity(id, {...})` →
+  `PATCH /api/sources/:id/connectivity` attaches/updates connectivity on an existing
+  source (Atlas-only / OM-only inputs rejected for the wrong type; secrets
+  re-encrypted; a history backfill kicks off if new API creds unlock it).
+- **Form:** one additive form — pick Atlas/on-prem, then fill any of connection
+  string, MCP, the matching admin API, and/or import files. At least one input is
+  required.
+- **Detail page:** a **Data availability** panel (`GET /api/sources/:id/capabilities`)
+  lists attached inputs, missing inputs + consequence, and a supplement action
+  (import a file, or add credentials).
 
 ---
 
