@@ -94,6 +94,17 @@ export class MongoMetricStore implements MetricSeriesStore {
     return (await coll.distinct("metric", { sourceId })) as string[];
   }
 
+  async listSeries(sourceId: string): Promise<Array<{ processId: string; metric: string; units: string }>> {
+    const coll = await this.coll();
+    const docs = await coll
+      .aggregate<{ _id: { processId?: string; metric: string }; units?: string }>([
+        { $match: { sourceId } },
+        { $group: { _id: { processId: "$processId", metric: "$metric" }, units: { $first: "$units" } } },
+      ])
+      .toArray();
+    return docs.map((d) => ({ processId: d._id.processId ?? "", metric: d._id.metric, units: d.units ?? "" }));
+  }
+
   async removeSource(sourceId: string): Promise<void> {
     const coll = await this.coll();
     await coll.deleteMany({ sourceId });

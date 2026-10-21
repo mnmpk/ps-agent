@@ -5,8 +5,9 @@ import { availabilityOf, type Availability } from "../core/capabilities.js";
 import { runGraphScan, scoreFactsToScan, canScanLive } from "../agent/graphs/healthScanGraph.js";
 import { parseGetMongoData } from "../collectors/getmongodata/parse.js";
 import { parseMdiag } from "../collectors/mdiag/parse.js";
-import { parseFtdc } from "../collectors/ftdc/parse.js";
-import { parseMongodLog } from "../collectors/mongodlog/parse.js";
+import { parseFtdc, type ParsedFtdc } from "../collectors/ftdc/parse.js";
+import { decodeFtdcFilesParallel } from "../collectors/ftdc/ftdcPool.js";
+import { parseMongodLog, parseMongodLogFile, type ParsedMongodLog } from "../collectors/mongodlog/parse.js";
 import { detectDiagnostic, looksLikeJsonPrefix, type DiagnosticKind } from "../collectors/detect.js";
 import { createNodeReconciler } from "../core/nodeIdentity.js";
 import { redactSource } from "../store/sourceStore.js";
@@ -64,6 +65,21 @@ export interface BundleImportResult {
   seriesCount: number;
   perFile: Array<{ filename: string; kind: DiagnosticKind; reason: string }>;
   warnings: string[];
+}
+
+/** Per-node metric time-series for the dashboard Metrics panel. */
+export interface NodeMetricsBundle {
+  /** processIds (host:port) that have stored series. */
+  nodes: string[];
+  /** Distinct metric keys available. */
+  metrics: string[];
+  /** series[processId][metric] = [[tsMs, value], …] (oldest→newest). */
+  series: Record<string, Record<string, Array<[number, number]>>>;
+  /**
+   * units[processId][metric] = unit string. For MEMBER_STATE_<n> series the unit
+   * is the replica-set member's NAME, so the timeline can label each row.
+   */
+  units: Record<string, Record<string, string>>;
 }
 
 /** Read the first `n` bytes of a file (for cheap content classification). */
@@ -553,7 +569,25 @@ export class HealthService {
     raw: string,
     opts: { name?: string; sourceId?: string } = {},
   ): Promise<ScanResult> {
-    const parsed = parseMongodLog(raw); // throws if not a recognized mongod.log
+    return this.ingestMongodLog(parseMongodLog(raw), opts);
+  }
+
+  /**
+   * Streaming variant of importMongodLog: parses the log by reading it from disk
+   * line-by-line (constant memory) instead of loading the whole file into a
+   * string. Used by the bundle importer for large (hundreds-of-MB) production logs.
+   */
+  async importMongodLogFile(
+    path: string,
+    opts: { name?: string; sourceId?: string } = {},
+  ): Promise<ScanResult> {
+    return this.ingestMongodLog(await parseMongodLogFile(path), opts);
+  }
+
+  private async ingestMongodLog(
+    parsed: ParsedMongodLog,
+    opts: { name?: string; sourceId?: string } = {},
+  ): Promise<ScanResult> {
     const log = parsed.log;
 
     // Aggregate slow-query lines into compact, redaction-safe per-namespace
@@ -753,7 +787,6 @@ export class HealthService {
     opts: { name?: string; sourceId?: string; input?: string } = {},
   ): Promise<ScanResult & { metricPointsAdded: number; seriesCount: number; filesProcessed: number; nodes: string[] }> {
     if (filePaths.length === 0) throw new Error("No FTDC files provided.");
-    const { readFile } = await import("node:fs/promises");
 
     // Resolve/create the single cluster source up front.
     let source: Source | null = opts.sourceId ? await this.sources.get(opts.sourceId) : null;
@@ -771,20 +804,27 @@ export class HealthService {
     let batchFrom = Infinity;
     let batchTo = -Infinity;
 
-    for (const path of filePaths) {
-      let parsed;
-      try {
-        const buf = await readFile(path); // one file in memory at a time
-        parsed = parseFtdc(buf); // buf is released after this scope iteration
-      } catch (err) {
-        warnings.push(`FTDC: skipped ${path}: ${(err as Error).message}`);
-        continue;
+    // Decode files in parallel across worker threads (x-ray-style), handling
+    // each result as it completes so points are appended and memory freed
+    // incrementally. Results arrive out of order; the source is created on the
+    // first successful decode. Appends are serialized via an await chain so the
+    // mutations below stay single-threaded on the main thread.
+    const logProgress = filePaths.length >= 8;
+    const onResult = async (o: {
+      path: string;
+      ok: boolean;
+      result?: ParsedFtdc;
+      error?: string;
+    }): Promise<void> => {
+      if (!o.ok || !o.result) {
+        warnings.push(`FTDC: skipped ${o.path}: ${o.error ?? "decode failed"}`);
+        return;
       }
+      const parsed = o.result;
       filesProcessed++;
       const node = parsed.host ?? "";
       if (parsed.host) nodes.add(parsed.host);
 
-      // Track time coverage (overall + per node).
       if (parsed.firstTs != null && parsed.lastTs != null) {
         batchFrom = Math.min(batchFrom, parsed.firstTs);
         batchTo = Math.max(batchTo, parsed.lastTs);
@@ -795,7 +835,6 @@ export class HealthService {
         });
       }
 
-      // Lazily create the source once we know a host name (better default name).
       if (!source) {
         source = {
           id: opts.sourceId ?? randomUUID(),
@@ -810,13 +849,11 @@ export class HealthService {
         });
       }
 
-      // Track the richest facts snapshot (most hostInfo/version signal).
       if (!bestFacts || factsScore(parsed.facts) > factsScore(bestFacts)) {
         bestFacts = parsed.facts;
         bestHost = parsed.host;
       }
 
-      // Append this file's per-node series immediately, then drop it.
       for (const s of parsed.series) {
         metricPointsAdded += await this.metrics.appendPoints(
           source.id,
@@ -827,11 +864,27 @@ export class HealthService {
         );
         seriesKeys.add(`${s.processId ?? ""}|${s.metric}`);
       }
-    }
+      if (logProgress && filesProcessed % 10 === 0) {
+        process.stderr.write(`  FTDC: ${filesProcessed}/${filePaths.length} files decoded…\n`);
+      }
+    };
+
+    // Serialize onResult callbacks (pool may deliver concurrently) so the shared
+    // mutable state above is only touched one message at a time.
+    let chain: Promise<void> = Promise.resolve();
+    await decodeFtdcFilesParallel(filePaths, (o) => {
+      chain = chain.then(() => onResult(o));
+      return chain;
+    });
+    await chain;
 
     if (!source || !bestFacts) {
       throw new Error("No decodable FTDC metric chunks found in the provided file(s).");
     }
+    // Re-bind through an explicit type: `bestFacts` is only assigned inside the
+    // decode callback, which defeats TS control-flow narrowing (it would be
+    // `never` here otherwise).
+    const snapshot: Omit<CollectedFacts, "sourceId" | "sourceName"> = bestFacts;
     void bestHost;
 
     // Record FTDC provenance on the source (what was ingested, from where, and
@@ -858,15 +911,15 @@ export class HealthService {
       facts = latest
         ? {
             ...latest.facts,
-            hostInfo: latest.facts.hostInfo ?? bestFacts.hostInfo,
-            serverStatus: latest.facts.serverStatus ?? bestFacts.serverStatus,
-            warnings: [...(latest.facts.warnings ?? []), ...bestFacts.warnings, ...warnings],
+            hostInfo: latest.facts.hostInfo ?? snapshot.hostInfo,
+            serverStatus: latest.facts.serverStatus ?? snapshot.serverStatus,
+            warnings: [...(latest.facts.warnings ?? []), ...snapshot.warnings, ...warnings],
             sourceId: source.id,
             sourceName: source.name,
           }
-        : { ...bestFacts, warnings: [...bestFacts.warnings, ...warnings], sourceId: source.id, sourceName: source.name };
+        : { ...snapshot, warnings: [...snapshot.warnings, ...warnings], sourceId: source.id, sourceName: source.name };
     } else {
-      facts = { ...bestFacts, warnings: [...bestFacts.warnings, ...warnings], sourceId: source.id, sourceName: source.name };
+      facts = { ...snapshot, warnings: [...snapshot.warnings, ...warnings], sourceId: source.id, sourceName: source.name };
     }
 
     const scan = scoreFactsToScan(source, facts);
@@ -1015,10 +1068,13 @@ export class HealthService {
     }
 
     // --- 3) mongod.log: per-node operational signals (merged onto the scan) ---
+    // Stream from disk line-by-line (constant memory) when a path is available;
+    // production logs can be hundreds of MB each.
     for (const c of mongodLog) {
       try {
-        const raw = (c.buf ?? (await readFile(c.path!))).toString("utf8");
-        const scan = await this.importMongodLog(raw, { sourceId });
+        const scan = c.path
+          ? await this.importMongodLogFile(c.path, { sourceId })
+          : await this.importMongodLog((c.buf ?? Buffer.alloc(0)).toString("utf8"), { sourceId });
         sourceId = scan.sourceId;
         lastScan = scan;
         if (scan.facts.log?.hostname) reconciler.add(scan.facts.log.hostname);
@@ -1101,6 +1157,44 @@ export class HealthService {
   /** Distinct metric names stored for a source. */
   async listMetricSeries(sourceId: string): Promise<string[]> {
     return this.metrics.listMetrics(sourceId);
+  }
+
+  /**
+   * Bundle of per-node metric time-series for the dashboard's Metrics panel.
+   * Returns the available nodes (processIds that have series), the available
+   * metric keys, and — for the requested node (or all nodes if none given) — the
+   * series as compact `[tsMs, value]` point arrays per metric. Downsampled points
+   * are already hourly, so payloads stay small.
+   */
+  async getNodeMetrics(
+    sourceId: string,
+    opts: { processId?: string; metrics?: string[]; since?: Date } = {},
+  ): Promise<NodeMetricsBundle> {
+    const all = await this.metrics.listSeries(sourceId);
+    const nodes = [...new Set(all.map((s) => s.processId).filter((p) => p))].sort();
+    const metricNames = [...new Set(all.map((s) => s.metric))].sort();
+
+    // Which (processId, metric) pairs to actually read.
+    const wantMetrics = opts.metrics && opts.metrics.length ? new Set(opts.metrics) : null;
+    const targets = all.filter(
+      (s) =>
+        (opts.processId === undefined || s.processId === opts.processId) &&
+        (!wantMetrics || wantMetrics.has(s.metric)),
+    );
+
+    const series: NodeMetricsBundle["series"] = {};
+    const units: NodeMetricsBundle["units"] = {};
+    for (const { processId, metric, units: u } of targets) {
+      const points = await this.metrics.getSeries(sourceId, metric, {
+        processId: processId || undefined,
+        since: opts.since,
+      });
+      if (points.length === 0) continue;
+      (series[processId] ??= {})[metric] = points.map((p) => [p.ts.getTime(), p.value]);
+      (units[processId] ??= {})[metric] = u;
+    }
+
+    return { nodes, metrics: metricNames, series, units };
   }
 
   /** finishedAt of the most recent scan for a source, or null if none exists. */
@@ -1346,7 +1440,9 @@ export class HealthService {
   ): Promise<ScanResult> {
     const source = await this.sources.get(id);
     if (!source) throw new Error(`Source ${id} not found`);
-    // No live connection → re-score the last import instead of collecting live.
+    // No live connection → RE-ANALYZE: re-run the rule engine + risk register on
+    // the last import's stored facts (no re-import of raw files needed) and
+    // persist the fresh scan so the dashboard reflects the new result.
     if (!canScanLive(source)) {
       const metas = await this.scans.listScans(id);
       const latest = metas[0] ? await this.scans.getScan(metas[0].id) : null;
@@ -1356,7 +1452,14 @@ export class HealthService {
             "Add a connection string / MCP / Atlas / Ops Manager API, or import diagnostics first.",
         );
       }
-      return scoreFactsToScan(source, latest.facts);
+      const rescored = scoreFactsToScan(source, latest.facts);
+      await this.scans.saveScan(rescored);
+      await this.audit.record({
+        action: "scan.run",
+        sourceId: id,
+        detail: { reanalyze: true, score: rescored.score.value, findings: rescored.findings.length },
+      });
+      return rescored;
     }
     const result = await runGraphScan(source, {
       summarize,

@@ -38,9 +38,16 @@ interface LogEntry {
   t?: unknown; // { $date: "..." } or string
 }
 
-export function parseMongodLog(raw: string): ParsedMongodLog {
-  const warnings: string[] = [];
-  const log: LogFacts = {
+/**
+ * Stateful, streaming accumulator for mongod.log lines. Feed it one line at a
+ * time with `addLine()`, then call `finish()`. This lets both the in-memory
+ * (`parseMongodLog`) and the streaming (`parseMongodLogFile`) entry points share
+ * the exact per-line logic without ever holding the whole file — essential for
+ * multi-hundred-MB production logs.
+ */
+export class MongodLogAccumulator {
+  private readonly warnings: string[] = [];
+  private readonly log: LogFacts = {
     errorCount: 0,
     fatalCount: 0,
     warningCount: 0,
@@ -54,36 +61,35 @@ export function parseMongodLog(raw: string): ParsedMongodLog {
     connectionsAccepted: 0,
     connectionsEnded: 0,
     slowQueryCount: 0,
-    warnings,
+    warnings: this.warnings,
   };
-  const slowQueryLines: string[] = [];
-  const errorMsgCounts = new Map<string, { count: number; sample?: string }>();
+  private readonly slowQueryLines: string[] = [];
+  private readonly errorMsgCounts = new Map<string, { count: number; sample?: string }>();
+  private parsedAny = false;
+  private skipped = 0;
+  private host: string | undefined;
 
-  let parsedAny = false;
-  let skipped = 0;
-  let host: string | undefined;
-
-  const lines = raw.split(/\r?\n/);
-  for (const line of lines) {
+  addLine(line: string): void {
     const trimmed = line.trim();
-    if (!trimmed) continue;
+    if (!trimmed) return;
     // Structured logs are per-line JSON objects.
     if (trimmed[0] !== "{") {
-      skipped++;
-      continue;
+      this.skipped++;
+      return;
     }
     let e: LogEntry;
     try {
       e = JSON.parse(trimmed) as LogEntry;
     } catch {
-      skipped++;
-      continue;
+      this.skipped++;
+      return;
     }
     if (!e || typeof e !== "object" || (e.s === undefined && e.msg === undefined)) {
-      skipped++;
-      continue;
+      this.skipped++;
+      return;
     }
-    parsedAny = true;
+    const log = this.log;
+    this.parsedAny = true;
     log.totalLines++;
 
     const sev = e.s ?? "";
@@ -106,16 +112,16 @@ export function parseMongodLog(raw: string): ParsedMongodLog {
     // Track the most frequent error/fatal messages for actionable findings.
     if (sev === "E" || sev === "F") {
       const key = msg || "(no message)";
-      const cur = errorMsgCounts.get(key) ?? { count: 0, sample: sampleOf(attr) };
+      const cur = this.errorMsgCounts.get(key) ?? { count: 0, sample: sampleOf(attr) };
       cur.count++;
-      errorMsgCounts.set(key, cur);
+      this.errorMsgCounts.set(key, cur);
     }
 
     // --- Lifecycle: startups & shutdowns ---
     if (isStartup(msg, attr)) {
       log.startupCount++;
       const h = hostnameFrom(attr);
-      if (h && !host) host = h;
+      if (h && !this.host) this.host = h;
       const v = versionFrom(attr);
       if (v && !log.mongoVersion) log.mongoVersion = v;
     }
@@ -123,8 +129,7 @@ export function parseMongodLog(raw: string): ParsedMongodLog {
 
     // --- Replication ---
     // Elections span several log lines (dry run, vote requests, success). Count
-    // only the "start" line so repeated elections aren't over-counted. The start
-    // is logged under the ELECTION/REPL components as "Starting an election…".
+    // only the "start" line so repeated elections aren't over-counted.
     if ((comp === "ELECTION" || comp === "REPL" || comp.startsWith("REPL_")) &&
         /(starting|conducting|calling) an election/i.test(msg)) {
       log.electionCount++;
@@ -150,31 +155,51 @@ export function parseMongodLog(raw: string): ParsedMongodLog {
     // --- Slow queries → hand off to the capacity aggregator ---
     if (msg === "Slow query") {
       log.slowQueryCount++;
-      slowQueryLines.push(trimmed);
+      this.slowQueryLines.push(trimmed);
     }
   }
 
-  if (!parsedAny) {
-    throw new Error(
-      "Not a recognized mongod.log: no structured JSON log lines found (MongoDB 4.4+ JSON format required).",
-    );
+  finish(): ParsedMongodLog {
+    if (!this.parsedAny) {
+      throw new Error(
+        "Not a recognized mongod.log: no structured JSON log lines found (MongoDB 4.4+ JSON format required).",
+      );
+    }
+    if (this.skipped > 0) {
+      this.warnings.push(`${this.skipped} non-JSON / unparsable line(s) skipped.`);
+    }
+    if (this.errorMsgCounts.size > 0) {
+      this.log.topErrors = [...this.errorMsgCounts.entries()]
+        .map(([msg, v]) => ({ msg, count: v.count, sample: v.sample }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+    }
+    if (this.host) this.log.hostname = this.host;
+    return { log: this.log, slowQueryLines: this.slowQueryLines, host: this.host };
   }
+}
 
-  if (skipped > 0) {
-    warnings.push(`${skipped} non-JSON / unparsable line(s) skipped.`);
-  }
+/** Parse a mongod.log held in memory as a string. */
+export function parseMongodLog(raw: string): ParsedMongodLog {
+  const acc = new MongodLogAccumulator();
+  for (const line of raw.split(/\r?\n/)) acc.addLine(line);
+  return acc.finish();
+}
 
-  // Top error messages (most frequent first), capped to keep facts compact.
-  if (errorMsgCounts.size > 0) {
-    log.topErrors = [...errorMsgCounts.entries()]
-      .map(([msg, v]) => ({ msg, count: v.count, sample: v.sample }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5);
-  }
-
-  if (host) log.hostname = host;
-
-  return { log, slowQueryLines, host };
+/**
+ * Parse a mongod.log by STREAMING it from disk line-by-line (constant memory),
+ * for large production logs that must not be read fully into a string.
+ */
+export async function parseMongodLogFile(path: string): Promise<ParsedMongodLog> {
+  const { createReadStream } = await import("node:fs");
+  const { createInterface } = await import("node:readline");
+  const acc = new MongodLogAccumulator();
+  const rl = createInterface({
+    input: createReadStream(path, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of rl) acc.addLine(line);
+  return acc.finish();
 }
 
 /** Extract an ISO timestamp string from the log entry's `t` field. */

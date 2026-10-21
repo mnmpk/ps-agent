@@ -68,9 +68,11 @@ export function parseGetMongoData(raw: string): ParsedGetMongoData {
       ? (serverParamsRaw as Record<string, unknown>)
       : undefined;
 
-  // Replica set status.
+  // Replica set status (replSetGetStatus) + config (replSetGetConfig). Status has
+  // live state/health; config has votes/priority/hidden/arbiterOnly — merge them.
   const replRaw = get("replicaset_info", "replica_status") ?? getByLabel("replica_status");
-  const replSetStatus = replRaw ? parseReplSetStatus(replRaw) : undefined;
+  const replCfgRaw = get("replicaset_info", "replica_set_config") ?? getByLabel("replica_set_config");
+  const replSetStatus = replRaw ? parseReplSetStatus(replRaw, replCfgRaw) : undefined;
 
   const topology = deriveTopology(serverStatus, replSetStatus, buildInfoRaw);
 
@@ -240,20 +242,36 @@ function parseHostInfo(raw: any): HostInfo {
   };
 }
 
-function parseReplSetStatus(raw: any): ReplSetStatus {
-  const members: ReplMember[] = (raw.members ?? []).map((m: any) => ({
-    _id: m._id,
-    name: m.name,
-    health: m.health === 1 ? 1 : 0,
-    state: m.state,
-    stateStr: m.stateStr,
-    uptimeSec: m.uptime ?? 0,
-    optimeDate: m.optimeDate ? new Date(m.optimeDate) : undefined,
-    pingMs: typeof m.pingMs === "number" ? m.pingMs : undefined,
-    self: Boolean(m.self),
-    votes: m.votes ?? 1,
-    priority: m.priority ?? 1,
-  }));
+function parseReplSetStatus(raw: any, cfgRaw?: any): ReplSetStatus {
+  // Build a config lookup (votes/priority/hidden/arbiterOnly) keyed by host name
+  // and by _id — replSetGetStatus doesn't carry these; replSetGetConfig does.
+  const cfgMembers: any[] = cfgRaw?.members ?? cfgRaw?.config?.members ?? [];
+  const cfgByHost = new Map<string, any>();
+  const cfgById = new Map<number, any>();
+  for (const cm of cfgMembers) {
+    if (typeof cm?.host === "string") cfgByHost.set(cm.host, cm);
+    if (cm?._id != null) cfgById.set(Number(cm._id), cm);
+  }
+
+  const members: ReplMember[] = (raw.members ?? []).map((m: any) => {
+    const cfg = cfgByHost.get(m.name) ?? (m._id != null ? cfgById.get(Number(m._id)) : undefined);
+    return {
+      _id: m._id,
+      name: m.name,
+      health: m.health === 1 ? 1 : 0,
+      state: m.state,
+      stateStr: m.stateStr,
+      uptimeSec: m.uptime ?? 0,
+      optimeDate: m.optimeDate ? new Date(m.optimeDate) : undefined,
+      pingMs: typeof m.pingMs === "number" ? m.pingMs : undefined,
+      self: Boolean(m.self),
+      // Prefer real config values; fall back to any status value, else defaults.
+      votes: cfg?.votes ?? m.votes ?? 1,
+      priority: cfg?.priority ?? m.priority ?? 1,
+      hidden: cfg?.hidden ?? undefined,
+      arbiterOnly: cfg?.arbiterOnly ?? undefined,
+    };
+  });
   return {
     set: raw.set,
     myStateStr: typeof raw.myState === "number" ? stateToStr(raw.myState) : "UNKNOWN",

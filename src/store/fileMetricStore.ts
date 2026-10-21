@@ -130,6 +130,20 @@ export class FileMetricStore implements MetricSeriesStore {
     return [...metrics];
   }
 
+  async listSeries(sourceId: string): Promise<Array<{ processId: string; metric: string; units: string }>> {
+    const data = await this.read(sourceId);
+    const out: Array<{ processId: string; metric: string; units: string }> = [];
+    for (const [key, entry] of Object.entries(data.series)) {
+      // key = `${processId||""}|${metric}` (metric may itself contain nothing special).
+      const sep = key.indexOf("|");
+      if (sep < 0) continue;
+      const processId = key.slice(0, sep);
+      const metric = key.slice(sep + 1);
+      if (metric) out.push({ processId, metric, units: entry.units ?? "" });
+    }
+    return out;
+  }
+
   async removeSource(sourceId: string): Promise<void> {
     const f = this.file(sourceId);
     if (existsSync(f)) {

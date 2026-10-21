@@ -41,9 +41,14 @@ export interface ReplMember {
   pingMs?: number;
   /** True for the node we are currently connected to. */
   self: boolean;
-  /** Voting member (votes > 0). */
+  /** Voting member (votes > 0). From replica-set config. */
   votes: number;
+  /** Election priority. From replica-set config. */
   priority: number;
+  /** Hidden member (not advertised to clients). From replica-set config. */
+  hidden?: boolean;
+  /** Arbiter (votes but holds no data). From replica-set config. */
+  arbiterOnly?: boolean;
 }
 
 export interface ReplSetStatus {

@@ -29,6 +29,14 @@ export interface MetricSeriesStore {
   /** Distinct metric names available for a source. */
   listMetrics(sourceId: string): Promise<string[]>;
 
+  /**
+   * Distinct (processId, metric, units) series available for a source — used to
+   * drive per-node charts (which nodes have which metrics). `processId` is "" when
+   * a series has no node id. `units` is the stored unit string (also carries the
+   * member name for MEMBER_STATE_* series).
+   */
+  listSeries(sourceId: string): Promise<Array<{ processId: string; metric: string; units: string }>>;
+
   /** Remove all series for a source (on deregister). */
   removeSource(sourceId: string): Promise<void>;
 }

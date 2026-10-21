@@ -385,6 +385,7 @@ ps-agent/
 11. ✅ **MongoDB agent skills** (vendored official skills, relevance-injected into LLM prompts) — see §17.
 12. ✅ **Cached reports** (persist last capacity/risk report; scan-tied freshness; dashboard auto-display) — see §18.
 13. ✅ **Deployment + capability model** (classify atlas/on-prem; additive inputs; derived capabilities; data-availability panel; supplement via `attachConnectivity`) — see §19.
+14. ✅ **Per-node metrics charts** (inline-SVG FTDC time-series on the detail page, node selector, x-ray-parity metric extraction) — see §20.
 
 > Note on the stack: the implementation uses Node's built-in `http` server (not
 > Fastify), SSE (not raw WebSockets), a self-contained dashboard SPA served as a
@@ -539,41 +540,59 @@ Linux-shaped chunk (CPU normalization, disk space, IOPS all exact).
   latest sample) → a scan + health score, like getMongoData; and
 - `MetricSeries[]` using the **canonical capacity keys** the engine understands:
   `CACHE_USED_BYTES` (WT cache, gauge), `SYSTEM_NORMALIZED_CPU_USER/_KERNEL`
-  (cumulative `systemMetrics.cpu.*_ms` → %/core via per-interval delta ÷
-  interval ÷ cores), `DISK_PARTITION_SPACE_USED/_FREE` (from
-  `systemMetrics.mounts.<mount>`), `DISK_PARTITION_IOPS_TOTAL`
-  (Σ `systemMetrics.disks.<dev>.{reads,writes}` rate), plus opcounter rates.
-  OS-level CPU/disk only exist in FTDC on **Linux** (`/proc`); the serverStatus
-  gauges (cache, connections, opcounters) are always present.
+  (cumulative `systemMetrics.cpu.*_ms` → %/core via windowed delta ÷ window ÷
+  cores), `DISK_PARTITION_SPACE_USED/_FREE` (from `systemMetrics.mounts.<mount>`),
+  `DISK_PARTITION_IOPS_TOTAL` (Σ `systemMetrics.disks.<dev>.{reads,writes}` rate),
+  plus opcounter rates. OS-level CPU/disk only exist in FTDC on **Linux** (`/proc`);
+  the serverStatus gauges (cache, connections, opcounters) are always present.
+
+- **Rate windowing (important).** Several Linux FTDC counters — notably
+  `systemMetrics.cpu.*_ms` and the per-disk counters — are jittery/non-monotonic at
+  1 Hz, so naïve 1-second deltas produced garbage (CPU pegged at 100%, ~33 M ops/s
+  IOPS). Two fixes (`windowedSeries` in `parse.ts`): (1) **never form a delta across
+  an FTDC chunk boundary** — a new chunk's reconstructed first sample doesn't make a
+  valid delta against the previous chunk's last sample and spikes; (2) compute rates
+  over a sliding **~20 s window** (`PS_AGENT_FTDC_RATE_WINDOW_SEC`, default 20)
+  **within** each chunk, mirroring x-ray's ~1/20 sampling, which averages the jitter
+  out. After this, CPU reads ~2% median / tens-of-% peaks and IOPS/latency are
+  realistic. Applies to `pushCpuNormalized`, `pushRate` (opcounters), `pushIopsTotal`,
+  and `buildDiskOpsLatency`.
 
 **Import — raw files stay local; only downsampled series are stored.** Raw FTDC is
 large (~3,200 metrics × 1 sample/s × N nodes → GBs). We deliberately do **not** copy
-it into the agent store; we decode it, extract a curated set of ~11 capacity series,
-and **downsample each series to hourly buckets** (`src/collectors/ftdc/downsample.ts`)
+it into the agent store; we decode it, extract a curated set of ~22 capacity series,
+and **downsample each series to 5-minute buckets** (`src/collectors/ftdc/downsample.ts`)
 before it reaches the metric store.
 
-- **Why downsample:** FTDC samples ~1 Hz — ~3,600× finer than the resolution the
-  rest of the system uses. Atlas/OpsManager request **PT1H** history and the
-  capacity engine targets hourly (`DEFAULT_HISTORY=PT1H`, `MIN_POINTS=6`,
-  `MIN_SPAN_DAYS=2`). Full per-second import would store ~85 M points **per node**
-  per 90 days (one Mongo doc each); hourly brings it to ~24 K — parity with Atlas,
-  ~3,600× fewer — with no analytical loss (verified: OLS trend/day, days-until-full
-  and R²≈1.0 are exact on hourly data).
-- **Aggregation per series type** (`aggForMetric`): gauges (cache / disk-used /
-  disk-free / connections) → **mean** per bucket; spiky rate series (CPU user/kernel,
-  IOPS, opcounters) → **max** per bucket, so the engine's p95 still reflects real
-  peaks instead of smoothed averages. Bucket timestamps are floored to the hour, so
-  re-importing overlapping files stays idempotent (same bucket ts → merge-by-ts).
-  Bucket width is `PT1H` by default, overridable via `PS_AGENT_FTDC_BUCKET_SECONDS`.
+- **Why downsample:** FTDC samples ~1 Hz — far finer than needed. Full per-second
+  import would store ~85 M points **per node** per 90 days; 5-minute buckets bring it
+  to ~26 K/series (~130 MB/cluster for 6 nodes), with no analytical loss. (Earlier
+  the default was hourly; 5-minute was chosen for more readable charts — still ~300×
+  sparser than raw and far sparser than x-ray's ~1/20 read sample.)
+- **Aggregation per series type** (`aggForMetric`): gauges (cache fill/dirty %,
+  memory, disk-used/free, connections) → **mean** per bucket; spiky rate series (CPU,
+  IOPS, disk ops/latency, opcounters) → **max** per bucket, so the engine's p95 still
+  reflects real peaks; member-state → **last** (categorical). Bucket timestamps are
+  floored, so re-importing overlapping files stays idempotent (same bucket ts →
+  merge-by-ts). Bucket width defaults to **5 minutes**, overridable via
+  `PS_AGENT_FTDC_BUCKET_SECONDS` (e.g. `3600` to minimize storage).
 
 Two entry points:
 
 - `HealthService.importFtdcFiles(filePaths, {name, sourceId})` — the scalable path
-  (CLI). Reads, decodes, and `appendPoints` **one file at a time**, freeing each
-  buffer before the next, so a multi-GB, multi-node import stays within bounded
-  memory (verified: ~0 MB heap growth across files). All nodes map to a **single**
-  offline source; each node keeps its own `processId` (host:port) series, and
-  capacity rolls up across nodes via the store's busiest-node max aggregation.
+  (CLI + bundle). Files are **decoded in parallel across worker threads**
+  (`src/collectors/ftdc/ftdcPool.ts` + `worker.ts`), mirroring x-ray's multi-core
+  FTDC reader: each worker runs the single-threaded `parseFtdc` on one file and
+  posts back only the **compact** result (facts + the ~11 curated series, never the
+  raw per-sample matrices). Results are handled as each file completes, so
+  `appendPoints` runs and buffers are freed incrementally — a multi-GB, many-file
+  import is bounded by CPU across cores instead of one, and stays within bounded
+  memory. Worker count = `PS_AGENT_FTDC_WORKERS` (default min(4, cores−1)); falls
+  back to in-process sequential decode if worker threads are unavailable. The
+  worker entry resolves as `.ts` under tsx (dev, with the tsx loader passed via
+  `execArgv`) or `.js` in dist. All nodes map to a **single** offline source; each
+  node keeps its own `processId` (host:port) series, and capacity rolls up across
+  nodes via the store's busiest-node max aggregation.
 - `HealthService.importFtdc(buffer, {name, sourceId})` — single in-memory buffer,
   used by the HTTP upload route (bounded by one uploaded file).
 
@@ -626,9 +645,15 @@ agent figures out the rest.
   identified by its precise binary signature (first BSON doc begins with an `_id`
   UTC-datetime element — `09 5f 69 64 00`), which cleanly excludes WiredTiger `.wt`
   and other binaries; the JSON-array kinds (getMongoData/mdiag) are told apart by
-  their section vocabulary; a **mongod.log** is recognized as NDJSON whose first
-  lines are log-entry objects (`{t,s,c,msg}`). Works on a 4 KiB prefix, so multi-GB
-  FTDC is never fully read just to classify.
+  their **section vocabulary** (getMongoData: `server_status_info`/`data_info`/…;
+  mdiag: `sysctl`/`transparent_hugepage`/`read_ahead_kb`/…) with mdiag's
+  `script: "mdiag.sh"`/`rc` structural marker as the tiebreaker — NOT by a `host`
+  field, which real-world files of both kinds carry (an earlier `host`-based
+  heuristic misclassified production mdiag v2.x as getMongoData); a **mongod.log**
+  is recognized as NDJSON whose first lines are log-entry objects (`{t,s,c,msg}`).
+  A 4 KiB prefix may be inconclusive for the JSON kinds, so `importBundle`
+  re-classifies them from the full file (they're small; FTDC is never fully read
+  to classify).
 - **`HealthService.importBundle(files[], {name, sourceId})`**: classifies every
   file, then ingests in dependency order — **getMongoData first** (sets the
   cluster source + topology/config), then **mdiag** (per-node OS facts merged onto
@@ -679,6 +704,13 @@ happened on a node. A **mongod.log** (structured JSON, 4.4+) does. `parseMongodL
 - **Slow-query lines** → aggregated (reusing `aggregateSlowQueries`, §14.3) into
   per-namespace `QuerySignal[]` stored on `source.logQuerySignals` (compact,
   redaction-safe — no query values).
+
+The per-line logic lives in a shared `MongodLogAccumulator` so both entry points
+reuse it: `parseMongodLog(raw)` (in-memory string) and `parseMongodLogFile(path)`,
+which **streams the file line-by-line** via `readline` over a read stream (constant
+memory). The bundle importer uses the streaming path (`importMongodLogFile`) — real
+production logs are hundreds of MB each, so reading them fully into a string would
+spike the heap.
 
 `HealthService.importMongodLog(raw, {sourceId})` enriches the latest scan (or
 bootstraps a standalone offline source) and re-scores. New **`log.*` checks**
@@ -771,6 +803,70 @@ classification plus a derived capability model.
 - **Detail page:** a **Data availability** panel (`GET /api/sources/:id/capabilities`)
   lists attached inputs, missing inputs + consequence, and a supplement action
   (import a file, or add credentials).
+
+---
+
+## 20. Phase 14 — Per-node metrics charts (x-ray-style)
+
+The capacity panel reduces series to scalars; this phase surfaces the **raw
+per-node FTDC time-series** as charts on the detail page, inspired by the x-ray
+FTDC report. Two parts:
+
+**A — serve + chart what's stored.**
+- **Store:** `MetricSeriesStore.listSeries(sourceId)` → distinct `(processId,
+  metric)` pairs (file + Mongo), so the UI knows which nodes have which metrics.
+- **Service:** `getNodeMetrics(sourceId, {processId?, metrics?, since?})` →
+  `{ nodes, metrics, series[processId][metric] = [[tsMs,value],…] }`. Reads series
+  **per processId** (the capacity path uses the busiest-node collapse; this one
+  does not).
+- **API:** `GET /api/sources/:id/metrics` (`?processId=`, `?metrics=A,B`, `?days=N`).
+- **Dashboard:** a `#metrics-panel` between capacity and risk. `loadMetrics` fetches
+  the bundle; a **node selector** (defaults to the PRIMARY via `replSetStatus`
+  state + `reconcileNodeName`) switches nodes. Charts are **inline SVG**
+  (`sparkline()` builds `<path>` area+line, with warn/critical dashed guide lines
+  for `%` metrics) — no external JS/CDN, preserving the self-contained-HTML design.
+  Metrics are grouped **Workload / Ops & latencies / Performance**, each row showing
+  peak / average.
+
+**B — extend FTDC extraction for x-ray parity.** `buildSeries` (`ftdc/parse.ts`)
+now also emits (the raw paths already decode): cache **fill %** / **dirty %**
+(`pushRatioPct`), **system memory utilization** (1 − MemAvailable/MemTotal),
+**memory fragmentation** (tcmalloc heap vs allocated, `pushFragmentationPct`), **CPU
+iowait**, **disk read/write ops** (rate) and **read/write latency** (Δtime/Δops,
+`buildDiskOpsLatency`), and the **getmore/command** opcounters — taking FTDC from
+~11 to ~22 per-node series. `aggForMetric` buckets the new spiky rate/latency series
+as **max** (peaks survive) and the `%`/byte gauges as **mean**. Re-importing FTDC
+populates the new charts; already-imported data shows the original ~11.
+
+**C — timeline + tooltips.**
+- **Member-state timeline:** `buildMemberStateSeries` emits one `MEMBER_STATE_<idx>`
+  step series per replica-set member (value = state code; `units` carries the member
+  NAME from the reference doc so the UI can label rows). It buckets with a new
+  `"last"` aggregation (state codes aren't averageable). The dashboard renders a
+  per-member band timeline (PRIMARY/SECONDARY/… colored over time) under the charts.
+- **Hover tooltips:** each `sparkline` wraps its SVG in a positioned container; a
+  `mousemove` handler maps the cursor x → nearest point by time and shows a vertical
+  guide line, a dot, and a tooltip with the formatted value + timestamp. Chart data
+  is kept in a per-render registry (`_sparkData`) rather than re-serialized into the
+  DOM. Still dependency-free.
+- **Node role/config tags:** each node-selector pill and member-state row is tagged
+  with the member's **role** (PRIMARY/SECONDARY/HIDDEN/ARBITER/DOWN) — matched from
+  the scan's `replSetStatus.members` via `reconcileNodeName` (FTDC uses short
+  `host:port`, the roster FQDN). When a **getMongoData** export is present, members
+  also show config badges (`v<votes>`, `p<priority>`, hidden, arbiter). Role/state is
+  always available (FTDC member docs); votes/priority/hidden/arbiterOnly come only
+  from `replSetGetConfig`, so the getMongoData parser (`parseReplSetStatus`) was
+  extended to **merge `replica_set_config`** into each member (keyed by host/`_id`) —
+  previously votes/priority defaulted to 1, masking e.g. hidden/zero-vote members.
+  This also feeds the existing replication risk checks with true values.
+
+**Scan-now semantics (clarified).** For a source with no live input, `scanSource`
+**re-analyzes**: it re-runs `scoreFactsToScan` on the last import's stored facts and
+**persists** the fresh scan (it does not re-read raw files — those aren't stored;
+dashboard uploads are temp files removed after import). The detail-page button
+relabels to **"Re-analyze"** when `capabilities.liveScan` is false. Re-reading files
+(e.g. after a parser improvement) is a deliberate re-import, not a routine scan — so
+raw file paths are intentionally not stored on the source.
 
 ---
 

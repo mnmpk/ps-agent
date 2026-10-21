@@ -97,6 +97,19 @@ export function renderDashboard(): string {
   .gbar { background: var(--panel2); border-radius: 5px; height: 10px; overflow: hidden; }
   .gbar > div { height: 100%; }
   .bnrow { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 13px; }
+  .mtable { width: 100%; border-collapse: collapse; }
+  .mtable td { padding: 4px 8px; border-top: 1px solid var(--border); vertical-align: middle; }
+  .mtable .mlabel { width: 200px; font-size: 13px; }
+  .mtable .mstat { width: 140px; font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .mtable .mthr { width: 70px; font-size: 11px; text-align: center; }
+  .mtable .mchart { min-width: 300px; }
+  .spark { display: block; background: var(--panel2); border-radius: 4px; }
+  .sparkwrap { position: relative; }
+  .hov-tip { position: absolute; top: -4px; transform: translateY(-100%); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; font-size: 11px;
+    white-space: nowrap; pointer-events: none; z-index: 5; }
+  button.ghost.active-node { color: var(--text); border-color: var(--accent); background: var(--panel2); }
+  .rolebadge { font-size: 9px; font-weight: 700; padding: 1px 4px; border-radius: 3px; color: #0b0d12; margin-left: 4px; vertical-align: middle; }
   .bnscore { color: #fff; font-size: 11px; font-weight: 700; border-radius: 4px; padding: 1px 6px; min-width: 24px; text-align: center; }
   .analysis { background: var(--panel2); border-left: 3px solid var(--accent); padding: 14px 16px;
     border-radius: 6px; margin-bottom: 20px; }
@@ -309,14 +322,16 @@ async function setSchedule(sourceId, seconds) {
 async function scanNow(sourceId, summarize) {
   if (typeof event !== 'undefined' && event) event.stopPropagation();
   const btns = Array.from(document.querySelectorAll('.scanbtn')).filter(b => b.dataset.sid === sourceId);
-  btns.forEach(b => { b.disabled = true; b.textContent = 'Scanning…'; });
+  // Preserve each button's label (it may say "Re-analyze" for import-only sources).
+  const labels = btns.map(b => b.textContent);
+  btns.forEach((b, i) => { b.disabled = true; b.textContent = (labels[i] === 'Re-analyze' ? 'Re-analyzing…' : 'Scanning…'); });
   try {
     await api('/api/sources/' + sourceId + '/scan' + (summarize ? '?summarize=1' : ''), { method: 'POST' });
     // Refresh current view (live-updates also triggers this on scan.completed).
     render();
   } catch (e) {
     alert('Scan failed: ' + e.message);
-    btns.forEach(b => { b.disabled = false; b.textContent = 'Scan now'; });
+    btns.forEach((b, i) => { b.disabled = false; b.textContent = labels[i] || 'Scan now'; });
   }
 }
 
@@ -494,9 +509,11 @@ function renderDetail(scan) {
         <div style="text-align:right">
           \${scoreHtml}
           <div style="margin-top:10px;display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">
-            <button class="action scanbtn" data-sid="\${scan.sourceId}" onclick="scanNow('\${scan.sourceId}', true)">Scan now</button>
-            <button class="ghost" onclick="document.getElementById('bundleFile').click()" title="Attach any mix of getMongoData, mdiag, FTDC, or mongod.log files (across nodes) — auto-detected and merged into this deployment">Import diagnostics…</button>
+            <button class="action scanbtn" id="scanbtn-detail" data-sid="\${scan.sourceId}" onclick="scanNow('\${scan.sourceId}', true)" title="Run a scan">Scan now</button>
+            <button class="ghost" onclick="document.getElementById('bundleFile').click()" title="Attach any mix of getMongoData, mdiag, FTDC, or mongod.log files (across nodes) — auto-detected and merged into this deployment">Import files…</button>
+            <button class="ghost" onclick="document.getElementById('bundleFolder').click()" title="Import a whole folder of diagnostics (recurses into subfolders) — each file is auto-detected and merged into this deployment">Import folder…</button>
             <input type="file" id="bundleFile" multiple style="display:none" onchange="uploadBundle('\${scan.sourceId}', this)" />
+            <input type="file" id="bundleFolder" webkitdirectory directory multiple style="display:none" onchange="uploadBundle('\${scan.sourceId}', this)" />
             <button class="ghost" onclick="removeSource('\${scan.sourceId}', '\${esc(scan.sourceName)}')">Deregister</button>
           </div>
           <div class="muted" id="mdiag-status" style="font-size:11px;margin-top:4px;text-align:right">\${scan.facts.os ? 'mdiag attached ✓' : ''}</div>
@@ -508,11 +525,13 @@ function renderDetail(scan) {
     \${analysis}
     <div id="availability-panel"></div>
     <div id="capacity-panel"></div>
+    <div id="metrics-panel"></div>
     <div id="risk-panel"></div>
     \${storagePanel(scan.facts.storage)}
     <h3>Findings (\${scan.findings.length})</h3>
     \${findings}\`;
-  const roster = (scan.facts.replSetStatus && scan.facts.replSetStatus.members || []).map(m => m.name);
+  const members = (scan.facts.replSetStatus && scan.facts.replSetStatus.members) || [];
+  const roster = members.map(m => m.name);
   loadFtdcProvenance(scan.sourceId, roster);
   // Data availability: what's attached, what's missing, and the consequence.
   loadAvailability(scan.sourceId);
@@ -521,6 +540,8 @@ function renderDetail(scan) {
   // expensive — Atlas/OpsManager API calls and an LLM round-trip).
   showCapacity(scan.sourceId);
   showRisks(scan.sourceId);
+  // Per-node FTDC metric charts. Pass members so we can default to the PRIMARY.
+  loadMetrics(scan.sourceId, members);
 }
 
 // Load + render the "data availability" panel: available inputs, missing inputs
@@ -531,6 +552,13 @@ async function loadAvailability(sourceId) {
   try {
     const a = await api('/api/sources/' + sourceId + '/capabilities');
     panel.innerHTML = availabilityPanel(a, sourceId);
+    // Import-only deployments can't collect live — "Scan now" just re-runs the
+    // rule engine + risk analysis on the imported facts, so relabel it.
+    const btn = document.getElementById('scanbtn-detail');
+    if (btn && a.capabilities && !a.capabilities.liveScan) {
+      btn.textContent = 'Re-analyze';
+      btn.title = 'Re-run the health + risk analysis on the imported data (no live connection; does not re-read files)';
+    }
   } catch (e) {
     panel.innerHTML = '';
   }
@@ -587,6 +615,301 @@ async function openSupplement(sourceId) {
     await api('/api/sources/' + encodeURIComponent(sourceId) + '/scan?summarize=1', { method: 'POST' }).catch(()=>{});
     openDetail(sourceId, null);
   } catch (e) { alert('Failed to attach: ' + e.message); }
+}
+
+// ---------------------------------------------------------------------------
+// Metrics panel — per-node FTDC time-series charts (inline SVG, no deps).
+// ---------------------------------------------------------------------------
+
+// Metric catalog: display label, unit, formatter, group, and optional warn/crit
+// thresholds (as fractions 0..1 for '%' metrics, else absolute). Grouped like
+// x-ray (Workload / Ops & Latencies / Performance). Entries whose key has no
+// stored series are simply skipped, so this can list Phase-B metrics up front.
+var METRIC_CATALOG = [
+  // Workload (opcounters, ops/s)
+  { key:'OPCOUNTER_QUERY',  label:'Query',   unit:'ops/s', group:'Workload', fmt:'num' },
+  { key:'OPCOUNTER_INSERT', label:'Insert',  unit:'ops/s', group:'Workload', fmt:'num' },
+  { key:'OPCOUNTER_UPDATE', label:'Update',  unit:'ops/s', group:'Workload', fmt:'num' },
+  { key:'OPCOUNTER_DELETE', label:'Delete',  unit:'ops/s', group:'Workload', fmt:'num' },
+  { key:'OPCOUNTER_COMMAND',label:'Command', unit:'ops/s', group:'Workload', fmt:'num' },
+  { key:'OPCOUNTER_GETMORE',label:'GetMore', unit:'ops/s', group:'Workload', fmt:'num' },
+  // Connections
+  { key:'CONNECTIONS', label:'Connections', unit:'count', group:'Workload', fmt:'num' },
+  // Ops & latencies
+  { key:'DISK_PARTITION_IOPS_TOTAL', label:'Disk IOPS (total)', unit:'ops/s', group:'Ops & latencies', fmt:'num' },
+  { key:'DISK_READ_OPS',   label:'Read operations',  unit:'ops/s', group:'Ops & latencies', fmt:'num' },
+  { key:'DISK_WRITE_OPS',  label:'Write operations', unit:'ops/s', group:'Ops & latencies', fmt:'num' },
+  { key:'DISK_READ_LATENCY',  label:'Read latency',  unit:'ms/op', group:'Ops & latencies', fmt:'num' },
+  { key:'DISK_WRITE_LATENCY', label:'Write latency', unit:'ms/op', group:'Ops & latencies', fmt:'num' },
+  // Performance
+  { key:'SYSTEM_NORMALIZED_CPU_USER',   label:'CPU user',    unit:'%', group:'Performance', fmt:'pct', warn:85, crit:95 },
+  { key:'SYSTEM_NORMALIZED_CPU_KERNEL', label:'CPU system',  unit:'%', group:'Performance', fmt:'pct', warn:20, crit:30 },
+  { key:'SYSTEM_CPU_IOWAIT',            label:'CPU I/O wait', unit:'%', group:'Performance', fmt:'pct', warn:10, crit:20 },
+  { key:'SYSTEM_MEMORY_UTIL',           label:'System memory utilization', unit:'%', group:'Performance', fmt:'pct', warn:85, crit:95 },
+  { key:'MEMORY_FRAGMENTATION',         label:'Memory fragmentation', unit:'%', group:'Performance', fmt:'pct', warn:15, crit:25 },
+  { key:'CACHE_FILL_PCT',  label:'Cache fill',  unit:'%', group:'Performance', fmt:'pct', warn:80, crit:95 },
+  { key:'CACHE_DIRTY_PCT', label:'Cache dirty', unit:'%', group:'Performance', fmt:'pct', warn:5,  crit:20 },
+  { key:'CACHE_USED_BYTES', label:'Cache used', unit:'bytes', group:'Performance', fmt:'bytes' },
+  { key:'DISK_PARTITION_SPACE_USED', label:'Disk used',  unit:'bytes', group:'Performance', fmt:'bytes' },
+  { key:'DISK_PARTITION_SPACE_FREE', label:'Disk free',  unit:'bytes', group:'Performance', fmt:'bytes' },
+];
+var METRIC_GROUPS = ['Workload', 'Ops & latencies', 'Performance'];
+
+var _metricsState = { sourceId:null, node:null, bundle:null, members:[] };
+
+async function loadMetrics(sourceId, members) {
+  const panel = document.getElementById('metrics-panel');
+  if (!panel) return;
+  try {
+    const bundle = await api('/api/sources/' + sourceId + '/metrics');
+    if (!bundle.nodes || bundle.nodes.length === 0) { panel.innerHTML = ''; return; } // no FTDC series
+    _metricsState.sourceId = sourceId;
+    _metricsState.bundle = bundle;
+    _metricsState.members = members || []; // replSetStatus members (role + config)
+    // Default to the PRIMARY node if we can match it, else the first node.
+    _metricsState.node = pickDefaultNode(bundle.nodes, members);
+    renderMetricsPanel();
+  } catch (e) {
+    panel.innerHTML = '';
+  }
+}
+
+// Choose the PRIMARY (state 1) member whose name maps to a node with series.
+function pickDefaultNode(nodes, members) {
+  const primary = (members || []).find(m => m.state === 1 || m.stateStr === 'PRIMARY');
+  if (primary) {
+    const match = nodes.find(n => reconcileNodeName(n, members.map(m=>m.name)) === primary.name || n === primary.name);
+    if (match) return match;
+  }
+  return nodes[0];
+}
+
+function switchMetricsNode(node) { _metricsState.node = node; renderMetricsPanel(); }
+
+// Find the replSetStatus member matching a node/member name (via node-identity
+// reconciliation), so we can tag it with role + config (votes/priority/hidden).
+function memberFor(name) {
+  const members = _metricsState.members || [];
+  if (!members.length) return null;
+  const roster = members.map(m => m.name);
+  const canonical = reconcileNodeName(name, roster);
+  return members.find(m => m.name === canonical || m.name === name) || null;
+}
+
+// Short role label + color for a member (from its config/state).
+function memberRole(m) {
+  if (!m) return null;
+  if (m.arbiterOnly) return ['ARBITER', 'var(--accent)'];
+  if (m.hidden) return ['HIDDEN', 'var(--muted)'];
+  if (m.health === 0) return ['DOWN', 'var(--red)'];
+  const s = RS_STATES[m.state];
+  return s ? [s[0], s[1]] : [m.stateStr || 'UNKNOWN', 'var(--muted)'];
+}
+
+// Config badges (votes / priority / hidden / arbiter) when available.
+function memberConfigBadges(m) {
+  if (!m) return '';
+  const out = [];
+  if (m.votes != null) out.push('v' + m.votes);
+  if (m.priority != null) out.push('p' + m.priority);
+  if (m.hidden) out.push('hidden');
+  if (m.arbiterOnly) out.push('arbiter');
+  if (out.length === 0) return '';
+  return '<span class="muted" style="font-size:10px">' + out.map(esc).join(' · ') + '</span>';
+}
+
+function renderMetricsPanel() {
+  const panel = document.getElementById('metrics-panel');
+  if (!panel) return;
+  _sparkData = {}; _sparkSeq = 0; // reset chart registry for this render
+  const { bundle, node, sourceId } = _metricsState;
+  const nodeSeries = (bundle.series && bundle.series[node]) || {};
+
+  // Node selector pills, each tagged with the member's role/state when known.
+  const pills = bundle.nodes.map(n => {
+    const role = memberRole(memberFor(n));
+    const tag = role ? ' <span class="rolebadge" style="background:' + role[1] + '">' + role[0] + '</span>' : '';
+    return '<button class="ghost' + (n===node?' active-node':'') + '" style="font-size:11px;padding:3px 10px" onclick="switchMetricsNode(\\'' + esc(n) + '\\')">' + esc(n) + tag + '</button>';
+  }).join(' ');
+
+  // Only chart metrics that have data for this node, grouped + ordered.
+  let body = '';
+  for (const group of METRIC_GROUPS) {
+    const defs = METRIC_CATALOG.filter(d => d.group === group && nodeSeries[d.key] && nodeSeries[d.key].length);
+    if (defs.length === 0) continue;
+    const rows = defs.map(d => metricRow(d, nodeSeries[d.key])).join('');
+    body += '<div class="muted" style="font-size:12px;margin:14px 0 6px;font-weight:600">' + esc(group) + '</div>'
+      + '<table class="mtable"><tbody>' + rows + '</tbody></table>';
+  }
+
+  // Replica-set member-state timeline (if MEMBER_STATE_* series exist for this node).
+  const nodeUnits = (bundle.units && bundle.units[node]) || {};
+  const stateKeys = Object.keys(nodeSeries).filter(k => k.indexOf('MEMBER_STATE_') === 0)
+    .sort((a,b) => parseInt(a.slice(13)) - parseInt(b.slice(13)));
+  if (stateKeys.length) {
+    const rows = stateKeys.map(k => memberStateRow(nodeUnits[k] || k, nodeSeries[k])).join('');
+    body += '<div class="muted" style="font-size:12px;margin:14px 0 6px;font-weight:600">Replica-set member state</div>'
+      + MEMBER_STATE_LEGEND
+      + '<table class="mtable mtable-rs"><tbody>' + rows + '</tbody></table>';
+  }
+
+  if (!body) body = '<div class="muted">No chartable metrics for this node.</div>';
+
+  panel.innerHTML = '<div class="panel" style="margin-bottom:20px">'
+    + '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">'
+    + '<div style="font-weight:600">Metrics <span class="muted" style="font-weight:400;font-size:12px">(FTDC, per node)</span></div>'
+    + '<div style="display:flex;gap:4px;flex-wrap:wrap">' + pills + '</div></div>'
+    + body + '</div>';
+}
+
+// Replica-set member state codes → short label + color.
+var RS_STATES = {
+  0:['STARTUP','var(--muted)'], 1:['PRIMARY','var(--green)'], 2:['SECONDARY','var(--cyan)'],
+  3:['RECOVERING','var(--amber)'], 5:['STARTUP2','var(--amber)'], 6:['UNKNOWN','var(--muted)'],
+  7:['ARBITER','var(--accent)'], 8:['DOWN','var(--red)'], 9:['ROLLBACK','var(--red)'], 10:['REMOVED','var(--red)']
+};
+var MEMBER_STATE_LEGEND = (function(){
+  var items = [1,2,7,3,8,9].map(function(c){ var s=RS_STATES[c]; return '<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px"><span style="width:10px;height:10px;border-radius:2px;background:'+s[1]+';display:inline-block"></span>'+s[0]+'</span>'; }).join('');
+  return '<div class="muted" style="font-size:11px;margin-bottom:6px">'+items+'</div>';
+})();
+
+// One member row: name (+ config badges + self) · current state badge · timeline.
+function memberStateRow(name, points) {
+  const cur = points[points.length-1][1];
+  const curS = RS_STATES[cur] || ['STATE '+cur, 'var(--muted)'];
+  const m = memberFor(name);
+  const self = m && m.self ? ' <span class="muted" style="font-size:10px">(self)</span>' : '';
+  const cfg = memberConfigBadges(m);
+  return '<tr>'
+    + '<td class="mlabel">' + esc(name) + self + (cfg ? '<br>' + cfg : '') + '</td>'
+    + '<td class="mstat"><span class="badge" style="background:' + curS[1] + ';color:#0b0d12">' + curS[0] + '</span></td>'
+    + '<td class="mthr"></td>'
+    + '<td class="mchart">' + memberStateTimeline(points) + '</td>'
+    + '</tr>';
+}
+
+// Inline SVG step-band timeline of member state over time.
+function memberStateTimeline(points) {
+  const W = 460, H = 26;
+  if (!points || points.length === 0) return '';
+  const xs = points.map(p => p[0]);
+  const x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs);
+  const sx = (x) => (x1===x0 ? 0 : (x - x0) / (x1 - x0)) * W;
+  // Draw a rect for each segment between consecutive samples (step).
+  let rects = '';
+  for (let i=0;i<points.length;i++){
+    const xStart = sx(points[i][0]);
+    const xEnd = (i+1<points.length) ? sx(points[i+1][0]) : W;
+    const s = RS_STATES[points[i][1]] || ['?','var(--muted)'];
+    const w = Math.max(0.5, xEnd - xStart);
+    rects += '<rect x="'+xStart.toFixed(1)+'" y="0" width="'+w.toFixed(1)+'" height="'+H+'" fill="'+s[1]+'"><title>'+esc(s[0])+' @ '+fmtWhen(new Date(points[i][0]).toISOString())+'</title></rect>';
+  }
+  return '<svg viewBox="0 0 '+W+' '+H+'" width="100%" height="'+H+'" preserveAspectRatio="none" class="spark" style="border-radius:3px">'
+    + rects + '</svg>';
+}
+
+// One metric row: label + peak/avg + inline SVG chart.
+function metricRow(def, points) {
+  const vals = points.map(p => p[1]);
+  const peak = Math.max.apply(null, vals);
+  const avg = vals.reduce((a,b)=>a+b,0) / vals.length;
+  const fmt = (v) => def.fmt === 'bytes' ? fmtBytes(v)
+    : def.fmt === 'pct' ? (v.toFixed(2) + '%')
+    : (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2));
+  const thr = (def.warn!=null && def.crit!=null) ? (def.warn + ' / ' + def.crit) : '—';
+  return '<tr>'
+    + '<td class="mlabel">' + esc(def.label) + ' <span class="muted">(' + esc(def.unit) + ')</span></td>'
+    + '<td class="mstat">' + fmt(peak) + ' <span class="muted">/ ' + fmt(avg) + '</span></td>'
+    + '<td class="mthr muted">' + thr + '</td>'
+    + '<td class="mchart">' + sparkline(points, def) + '</td>'
+    + '</tr>';
+}
+
+// Registry of chart data by id, so hover handlers can look up the exact points
+// (points are not re-serialized into the DOM). Reset each render.
+var _sparkData = {};
+var _sparkSeq = 0;
+
+/**
+ * Inline SVG line chart (dependency-free). points = [[tsMs, value], …].
+ * Draws an area+line, optional warn/crit threshold lines for '%' metrics, and a
+ * hover overlay (guide line + dot + value/timestamp label) wired via mousemove.
+ */
+function sparkline(points, def) {
+  const W = 460, H = 90, PAD = 4;
+  if (!points || points.length === 0) return '';
+  const xs = points.map(p => p[0]), ys = points.map(p => p[1]);
+  const x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs);
+  let y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
+  // For % metrics, fix the scale 0..max(100,peak,crit) so thresholds are meaningful.
+  if (def && def.fmt === 'pct') { y0 = 0; y1 = Math.max(100, y1, def.crit||0); }
+  if (y1 - y0 < 1e-9) { y1 = y0 + 1; }
+  const sx = (x) => PAD + (x1===x0 ? 0 : (x - x0) / (x1 - x0)) * (W - 2*PAD);
+  const sy = (y) => H - PAD - (y - y0) / (y1 - y0) * (H - 2*PAD);
+  let line = '', area = 'M ' + sx(xs[0]).toFixed(1) + ' ' + (H-PAD).toFixed(1);
+  for (let i=0;i<points.length;i++){
+    const X = sx(xs[i]).toFixed(1), Y = sy(ys[i]).toFixed(1);
+    line += (i===0?'M ':'L ') + X + ' ' + Y + ' ';
+    area += ' L ' + X + ' ' + Y;
+  }
+  area += ' L ' + sx(xs[xs.length-1]).toFixed(1) + ' ' + (H-PAD).toFixed(1) + ' Z';
+  // Threshold guide lines.
+  let guides = '';
+  if (def && def.fmt === 'pct' && def.warn!=null) {
+    const yw = sy(def.warn).toFixed(1), yc = sy(def.crit).toFixed(1);
+    guides = '<line x1="0" x2="'+W+'" y1="'+yw+'" y2="'+yw+'" stroke="var(--amber)" stroke-width="0.7" stroke-dasharray="3 3" opacity="0.6"/>'
+           + '<line x1="0" x2="'+W+'" y1="'+yc+'" y2="'+yc+'" stroke="var(--red)" stroke-width="0.7" stroke-dasharray="3 3" opacity="0.6"/>';
+  }
+  const peak = Math.max.apply(null, ys);
+  const col = (def && def.fmt==='pct' && def.crit && peak>=def.crit) ? 'var(--red)'
+            : (def && def.fmt==='pct' && def.warn && peak>=def.warn) ? 'var(--amber)' : 'var(--accent)';
+  // Stash data + scale fns for the hover handler.
+  const id = 'spk' + (_sparkSeq++);
+  _sparkData[id] = { points, def, W, H, PAD, x0, x1, y0, y1, col };
+  const svg = '<svg viewBox="0 0 '+W+' '+H+'" width="100%" height="'+H+'" preserveAspectRatio="none" class="spark">'
+    + guides
+    + '<path d="'+area+'" fill="'+col+'" opacity="0.10"/>'
+    + '<path d="'+line+'" fill="none" stroke="'+col+'" stroke-width="1.3"/>'
+    + '<line class="hov-line" x1="0" x2="0" y1="0" y2="'+H+'" stroke="var(--text)" stroke-width="0.6" opacity="0" />'
+    + '<circle class="hov-dot" r="2.5" fill="'+col+'" opacity="0" />'
+    + '</svg>';
+  return '<div class="sparkwrap" data-spk="'+id+'" onmousemove="metricHover(event,this)" onmouseleave="metricHoverOut(this)">'
+    + svg + '<div class="hov-tip" style="display:none"></div></div>';
+}
+
+// Hover over a sparkline → show the nearest point's value + timestamp, a vertical
+// guide line, and a dot. Maps the cursor x to the nearest data point by time.
+function metricHover(ev, wrap) {
+  const d = _sparkData[wrap.getAttribute('data-spk')];
+  if (!d || !d.points.length) return;
+  const rect = wrap.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+  const targetTs = d.x0 + frac * (d.x1 - d.x0);
+  // Nearest point by time.
+  let idx = 0, best = Infinity;
+  for (let i=0;i<d.points.length;i++){ const dd = Math.abs(d.points[i][0]-targetTs); if (dd<best){best=dd;idx=i;} }
+  const pt = d.points[idx];
+  // SVG user-space coords for the guide line + dot.
+  const ux = d.PAD + (d.x1===d.x0 ? 0 : (pt[0]-d.x0)/(d.x1-d.x0)) * (d.W - 2*d.PAD);
+  const uy = d.H - d.PAD - (pt[1]-d.y0)/(d.y1-d.y0) * (d.H - 2*d.PAD);
+  const svg = wrap.querySelector('svg');
+  const vline = svg.querySelector('.hov-line'), dot = svg.querySelector('.hov-dot');
+  vline.setAttribute('x1', ux); vline.setAttribute('x2', ux); vline.setAttribute('opacity','0.5');
+  dot.setAttribute('cx', ux); dot.setAttribute('cy', uy); dot.setAttribute('opacity','1');
+  // Tooltip.
+  const tip = wrap.querySelector('.hov-tip');
+  const f = d.def.fmt === 'bytes' ? fmtBytes(pt[1])
+    : d.def.fmt === 'pct' ? (pt[1].toFixed(2)+'%')
+    : (Math.abs(pt[1])>=100 ? pt[1].toFixed(0) : pt[1].toFixed(2));
+  tip.innerHTML = '<strong>' + f + '</strong> <span class="muted">' + new Date(pt[0]).toLocaleString() + '</span>';
+  tip.style.display = 'block';
+  const px = Math.max(0, Math.min(rect.width - 150, frac*rect.width - 70));
+  tip.style.left = px + 'px';
+}
+function metricHoverOut(wrap) {
+  const svg = wrap.querySelector('svg');
+  if (svg) { const l=svg.querySelector('.hov-line'); const c=svg.querySelector('.hov-dot'); if(l)l.setAttribute('opacity','0'); if(c)c.setAttribute('opacity','0'); }
+  const tip = wrap.querySelector('.hov-tip'); if (tip) tip.style.display='none';
 }
 
 // Client-side node-identity reconciliation (mirrors src/core/nodeIdentity.ts) so
@@ -736,8 +1059,8 @@ function fmtWhen(iso) {
 function onOfflineDir() {
   const el = document.getElementById('offlineFile');
   const on = document.getElementById('offlineDir').checked;
-  if (on) el.setAttribute('webkitdirectory', '');
-  else el.removeAttribute('webkitdirectory');
+  if (on) { el.setAttribute('webkitdirectory', ''); el.setAttribute('directory', ''); }
+  else { el.removeAttribute('webkitdirectory'); el.removeAttribute('directory'); }
   el.value = '';
 }
 

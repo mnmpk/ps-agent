@@ -415,6 +415,25 @@ async function handle(
     }
   }
 
+  // Per-node metric time-series for the dashboard Metrics panel.
+  //   ?processId=<host:port>  — a single node (default: all nodes)
+  //   ?metrics=A,B,C          — restrict to these metric keys (default: all)
+  //   ?days=N                 — lookback window (default 90)
+  const sourceMetrics = path.match(/^\/api\/sources\/([^/]+)\/metrics$/);
+  if (method === "GET" && sourceMetrics) {
+    const id = decodeURIComponent(sourceMetrics[1]!);
+    const processId = url.searchParams.get("processId") ?? undefined;
+    const metricsParam = url.searchParams.get("metrics");
+    const metrics = metricsParam ? metricsParam.split(",").map((m) => m.trim()).filter(Boolean) : undefined;
+    const days = Number(url.searchParams.get("days") ?? 90);
+    const since = Number.isFinite(days) && days > 0 ? new Date(Date.now() - days * 86_400_000) : undefined;
+    try {
+      return sendJson(res, 200, await service.getNodeMetrics(id, { processId, metrics, since }));
+    } catch (err) {
+      return sendJson(res, 400, { error: (err as Error).message });
+    }
+  }
+
   // Risk register assessment (expert catalog cross-referenced vs this cluster).
   // Served from the last stored run by default; ?refresh=1 forces a recompute.
   // ?cachedOnly=1 returns the cached report if present, else 204 (no compute).

@@ -230,8 +230,10 @@ ps-agent import --dir ./diagnostics --name prod-cluster
 #          -F files=@n1/mongod.log
 ```
 
-On an existing deployment, use **"Import diagnostics…"** in the cluster detail view
-(or `POST /api/sources/:id/import`) to attach more files later. The individual
+On an existing deployment, use **"Import files…"** or **"Import folder…"** in the
+cluster detail view (or `POST /api/sources/:id/import`) to attach more diagnostics
+later. "Import folder…" recurses into subfolders, so you can point it at a whole
+`diagnostic.data` tree (or a multi-node collection) in one go. The individual
 commands below still work if you prefer to import one type at a time.
 
 Node identity is reconciled across the sources — getMongoData member names
@@ -278,16 +280,33 @@ ps-agent import --ftdc --file /path/to/diagnostic.data --source <sourceId>
 ```
 
 **The raw FTDC files stay on disk — the agent does not copy them into its store.**
-Raw FTDC is large (thousands of metrics at 1 sample/sec per node → GBs). The CLI
-streams the files **one at a time** (bounded memory, even for a multi-GB, multi-node
-import), decodes them, extracts a curated capacity set, and **downsamples each series
-to hourly buckets** before storing — matching the resolution Atlas/Ops Manager and the
-capacity engine already use (~3,600× fewer points than raw per-second, ~24K points per
-node per 90 days instead of ~85M, with no loss in trend/forecast accuracy). Gauges are
-averaged per hour; spiky series (CPU, IOPS) use the per-hour max so peaks survive for
-p95. Override the bucket with `PS_AGENT_FTDC_BUCKET_SECONDS` (e.g. `300` for 5-minute).
-All nodes of a replica set import into a single cluster source, each keeping its own
-per-node series; capacity rolls up across nodes automatically.
+Raw FTDC is large (thousands of metrics at 1 sample/sec per node → GBs). FTDC files
+are decoded **in parallel across worker threads** (one file per worker, results
+streamed back as each completes so points are appended and memory freed
+incrementally — a multi-GB, many-file import stays bounded and uses all cores).
+Each file is decoded, a curated capacity set extracted, and each series
+**downsampled to 5-minute buckets** before storing (~130 MB/cluster per 90 days for
+6 nodes — ~300× sparser than raw 1 Hz, still fine-grained for charts). Gauges are
+averaged per bucket; spiky rate series (CPU, IOPS, latency, opcounters) use the
+per-bucket max so peaks survive for p95.
+
+**Counter rates are computed over a ~20-second window, not per-second.** Several
+Linux counters in FTDC (notably `systemMetrics.cpu.*_ms` and disk counters) are
+jittery/non-monotonic at 1 Hz — naïve 1-second deltas produced nonsense (CPU pegged
+at 100%, impossible IOPS). Following x-ray's approach (which samples at ~1/20),
+rates are taken over a sliding ~20 s window **within each FTDC chunk** (never across
+a chunk boundary, where the reconstructed first sample would otherwise spike), which
+smooths the jitter and yields realistic values. Tune with:
+`PS_AGENT_FTDC_BUCKET_SECONDS` (storage bucket, default `300`),
+`PS_AGENT_FTDC_RATE_WINDOW_SEC` (rate window, default `20`), and
+`PS_AGENT_FTDC_WORKERS` (parallel decoders, default min(4, cores−1)). All nodes of a
+replica set import into a single cluster source, each keeping its own per-node
+series; capacity rolls up across nodes automatically.
+
+> A real 2.3 GB bundle (1 getMongoData, 6 mdiag, 12 × 200 MB mongod.log, 122 FTDC
+> files across 6 nodes) imports end-to-end in a few minutes. mongod.log files are
+> **streamed line-by-line** (constant memory), so hundreds-of-MB logs don't spike
+> the heap.
 
 The decoder reads the FTDC archive format directly (zlib + delta/varint
 reconstruction; no external tool) and extracts the canonical capacity series:
@@ -511,9 +530,35 @@ add whatever you have (connection string, MCP, Atlas/Ops Manager API, and/or
 import diagnostic files), and it registers the source, runs a scan, and shows the
 score. Tabs: **Fleet** (score per deployment) and **Risk inbox** (all findings,
 worst-first). Click a card for cluster detail (topology, **data availability**,
-capacity, risk register, findings, LLM analysis). The Data availability panel shows
-what's missing + the consequence and lets you supplement (import a file or add API
-keys) on the spot.
+capacity, **metrics charts**, risk register, findings, LLM analysis). The Data
+availability panel shows what's missing + the consequence and lets you supplement
+(import a file or add API keys) on the spot.
+
+### Metrics charts (per node)
+
+When FTDC (or Atlas/Ops Manager history) has been ingested, the detail page shows a
+**Metrics** panel of per-node time-series charts — like an inline version of the
+[x-ray](https://github.com/mongodb-ps/ce-mongo-x-ray) FTDC report. Pick a node
+(defaults to the PRIMARY) and see, grouped **Workload / Ops & latencies /
+Performance**: opcounters (query/insert/update/delete/getmore/command),
+connections, disk IOPS + read/write ops & latency, CPU user/system/iowait, system
+memory utilization, memory fragmentation, WiredTiger cache fill/dirty %, cache used,
+and disk space. There's also a **replica-set member-state timeline** (per-member
+PRIMARY/SECONDARY/… bands over the captured window). Each **node is tagged with its
+role** (PRIMARY / SECONDARY / HIDDEN / ARBITER / DOWN) on the selector pills and
+member rows; when a getMongoData export is imported, members also show their config
+badges (`v<votes>`, `p<priority>`, hidden, arbiter) from the replica-set config.
+Charts are **inline SVG** (no external JS/CDN — the dashboard stays a self-contained
+HTML document); `%` metrics show their warn/critical threshold lines, and
+**hovering** a chart shows the nearest point's value + timestamp with a guide line +
+dot. Each row lists peak / average. Backed by `GET /api/sources/:id/metrics`.
+
+> **"Scan now" vs re-import.** For a deployment with **no live connection**
+> (import-only), the detail-page button reads **"Re-analyze"** — it re-runs the
+> rule engine + risk register on the already-imported facts and persists a fresh
+> scan (it does **not** re-read files). To pick up new files or improved parsing,
+> import again. Deployments with a connection string / MCP / Atlas / OM API show
+> **"Scan now"** and collect live.
 
 Credentials are redacted in every API response (`admin:***`); the real string
 is kept server-side only to run scans.
@@ -545,6 +590,7 @@ is kept server-side only to run scans.
 | `PATCH` | `/api/sources/:id/config` | Set `{ schedule, thresholdOverrides }` |
 | `POST` | `/api/sources/:id/scan?summarize=1` | Run a scan |
 | `GET` | `/api/sources/:id/capacity` | Capacity report (cached; `?refresh=1` recomputes, `?cachedOnly=1` → cache or 204) |
+| `GET` | `/api/sources/:id/metrics` | Per-node metric time-series (`?processId=`, `?metrics=A,B`, `?days=N`) for the Metrics panel |
 | `GET` | `/api/scans?sourceId=:id` | List snapshots |
 | `GET` | `/api/scans/:scanId` | Full scan result |
 | `GET` | `/api/events` | Live event stream (SSE) |
@@ -606,6 +652,9 @@ Configure the backfill window/budget:
 | `PS_AGENT_HISTORY_GRANULARITY` | `PT1H` | Point interval (`PT5M`/`PT1H`/`PT6H`/`P1D`) |
 | `PS_AGENT_HISTORY_MAX_POINTS` | `2400` | Per-metric budget; if exceeded, granularity auto-coarsens (then window shortens) with a warning |
 | `PS_AGENT_METRIC_TTL_DAYS` | `95` | Retention for stored points |
+| `PS_AGENT_FTDC_BUCKET_SECONDS` | `300` | FTDC downsample bucket width (storage resolution) |
+| `PS_AGENT_FTDC_RATE_WINDOW_SEC` | `20` | Window for computing counter rates (CPU/IOPS/latency); smooths 1 Hz jitter |
+| `PS_AGENT_FTDC_WORKERS` | `min(4, cores−1)` | Parallel FTDC decode worker threads |
 
 ## Usage
 
@@ -763,9 +812,11 @@ Add a new check: create a function and call `register({...})` in a file under
 `src/checks/`, then import it from `src/checks/index.ts`.
 
 ### TODO/Bugs
-1. Cannot recognize mdiag output
+1. ~~Cannot recognize mdiag output~~ — fixed (section-vocabulary classifier)
 2. Disable "add deployment" button after click to avoid multiple add, show upload progress or make it background
 3. monogd.log can be obtained via atlas admin API if upload is missing.
 4. topology graph
-5. metrics charts like x-ray
+5. ~~metrics charts like x-ray~~ — done (per-node FTDC Metrics panel, inline SVG)
 6. host/cluster info from FTDC?
+7. ~~check sub-folder recursively for import~~ — done (dashboard "Import folder…"
+   recurses via `webkitdirectory`; CLI `--dir` already walks subfolders)

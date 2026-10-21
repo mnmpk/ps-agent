@@ -17,11 +17,16 @@ import type { MetricPoint } from "../../core/types.js";
  */
 export type BucketAgg = "mean" | "max" | "last";
 
-/** Default bucket width (ms). PT1H to match Atlas/OM + DEFAULT_HISTORY. */
+/**
+ * Default bucket width (ms). 5 minutes by default — fine enough for readable
+ * charts (≈288 points/series/day, ~130 MB/cluster/90d) while still ~300× sparser
+ * than raw 1 Hz FTDC. Override with PS_AGENT_FTDC_BUCKET_SECONDS (e.g. 3600 for
+ * hourly to minimize storage).
+ */
 export function defaultBucketMs(): number {
   const env = Number(process.env.PS_AGENT_FTDC_BUCKET_SECONDS);
   if (Number.isFinite(env) && env > 0) return env * 1000;
-  return 3_600_000; // 1 hour
+  return 300_000; // 5 minutes
 }
 
 /**
@@ -73,12 +78,21 @@ export function bucketPoints(
  * (to preserve peaks for p95); everything else is a level → mean.
  */
 export function aggForMetric(metric: string): BucketAgg {
+  // Replica-set member state is a categorical code (1=PRIMARY, 2=SECONDARY, …);
+  // averaging is meaningless — keep the state at the end of each bucket.
+  if (metric.startsWith("MEMBER_STATE_")) return "last";
   if (
     metric.startsWith("SYSTEM_NORMALIZED_CPU") ||
+    metric === "SYSTEM_CPU_IOWAIT" ||
     metric === "DISK_PARTITION_IOPS_TOTAL" ||
+    metric === "DISK_READ_OPS" ||
+    metric === "DISK_WRITE_OPS" ||
+    metric === "DISK_READ_LATENCY" ||
+    metric === "DISK_WRITE_LATENCY" ||
     metric.startsWith("OPCOUNTER_")
   ) {
     return "max";
   }
+  // % gauges (cache fill/dirty, memory util/frag) and byte/count gauges → mean.
   return "mean";
 }

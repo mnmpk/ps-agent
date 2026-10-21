@@ -266,7 +266,9 @@ async function runImport(argv: string[]): Promise<void> {
       process.stderr.write(`Import failed: ${(err as Error).message}\n`);
       process.exit(1);
     }
-    return;
+    // Exit explicitly: the store (and any worker pool) may hold the event loop
+    // open otherwise.
+    process.exit(0);
   }
 
   if (!file) {
@@ -306,7 +308,7 @@ async function runImport(argv: string[]): Promise<void> {
       process.stderr.write(`Import failed: ${(err as Error).message}\n`);
       process.exit(1);
     }
-    return;
+    process.exit(0);
   }
 
   let raw: string;
@@ -329,6 +331,7 @@ async function runImport(argv: string[]): Promise<void> {
     process.stderr.write(`Import failed: ${(err as Error).message}\n`);
     process.exit(1);
   }
+  process.exit(0);
 }
 
 /**

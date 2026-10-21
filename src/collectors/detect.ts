@@ -160,28 +160,36 @@ const MDIAG_SECTIONS = new Set([
 ]);
 
 function classifyJsonEntries(arr: any[]): DiagnosticKind {
+  // Both exports are JSON arrays of `{section, host, ref, version, …}` entries,
+  // and real-world files carry `host`/`ref`/`version`/`command` on BOTH — so those
+  // are NOT discriminating. We classify primarily by SECTION VOCABULARY, which is
+  // distinct and reliable (getMongoData: server_status_info/data_info/…; mdiag:
+  // sysctl/transparent_hugepage/read_ahead_kb/…). As a structural tiebreaker, only
+  // mdiag entries carry `script: "mdiag.sh"` or a non-trivial count of `rc` (shell
+  // return codes); getMongoData has neither.
   let gmd = 0;
   let mdiag = 0;
-  let mdiagSignal = false;
+  let mdiagStruct = false;
   for (const e of arr) {
     if (!e || typeof e !== "object") continue;
     const section = typeof e.section === "string" ? e.section : "";
     const subsection = typeof e.subsection === "string" ? e.subsection : "";
-    // mdiag entries commonly carry ref/version/command/rc; getMongoData carry host.
-    if ("ref" in e || "version" in e || "command" in e || "rc" in e) mdiagSignal = true;
-    if ("host" in e) gmd += 0.5;
+    if ((typeof e.script === "string" && /mdiag/i.test(e.script)) || "rc" in e) {
+      mdiagStruct = true;
+    }
     for (const s of [section, subsection]) {
       if (!s) continue;
       if (GMD_SECTIONS.has(s)) gmd++;
       if (MDIAG_SECTIONS.has(s)) mdiag++;
     }
   }
-  if (gmd === 0 && mdiag === 0) {
-    // No section hits — lean on the structural signal.
-    return mdiagSignal ? "mdiag" : "unknown";
-  }
+  // Decisive section-vocabulary winner.
+  if (gmd > 0 && gmd > mdiag * 2) return "getMongoData";
+  if (mdiag > 0 && mdiag > gmd * 2) return "mdiag";
+  // Mixed/close counts — the mdiag structural marker (script/rc) breaks the tie;
+  // getMongoData never has it.
+  if (mdiagStruct) return "mdiag";
   if (gmd > mdiag) return "getMongoData";
   if (mdiag > gmd) return "mdiag";
-  // Tie → structural signal breaks it toward mdiag.
-  return mdiagSignal ? "mdiag" : "getMongoData";
+  return "unknown";
 }
