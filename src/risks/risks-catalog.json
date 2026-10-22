@@ -8,7 +8,7 @@
       "probability": "Likely",
       "impact": "Moderate",
       "name": "Unable to Retrieve Script Outputs: Inability to retrieve script outputs from private cloud-hosted services may hinder troubleshooting and incident resolution.",
-      "description": "HSBC personnel do not have access to private cloud hosted instances and as such are unable to execute scripts on them to collect data.\r\n \r\n - FTDC can be retrieved.\r\n - getMongoData - executed externally - cannot be retrieved\r\n - mdiag - requires to be ran on the host cannot be retrieved.",
+      "description": "Personnel do not have access to private cloud hosted instances and as such are unable to execute scripts on them to collect data.\r\n \r\n - FTDC can be retrieved.\r\n - getMongoData - executed externally - cannot be retrieved\r\n - mdiag - requires to be ran on the host cannot be retrieved.",
       "recommendation": ""
     },
     {
@@ -19,7 +19,7 @@
       "impact": "Moderate",
       "name": "Customer SELinux policy can cause permission issues when starting MongoDB.",
       "description": "SELinux can cause permission issues when starting MongoDB, potentially preventing the service from accessing necessary files or directories, which may result in startup failures or restricted functionality.",
-      "recommendation": "Starting in MongoDB 5.0, a new SELinux policy is available for MongoDB installations that uses standard default configuration. Because HSBC uses a custom config file HSBC needs to test the SELinux policy it adopt. I am marking this risk as accepted because service owner are responsible to test the selinux configuration"
+      "recommendation": "Starting in MongoDB 5.0, a new SELinux policy is available for MongoDB installations that uses standard default configuration. For custom config files, the SELinux policy needs to be tested. I am marking this risk as accepted because service owners are responsible for testing the SELinux configuration"
     },
     {
       "id": "3",
@@ -148,7 +148,7 @@
       "probability": "Possible",
       "impact": "Moderate",
       "name": "Lack of Incident Management Plan: The absence of a defined incident management plan and playbook slows down incident response and mitigation efforts.",
-      "description": "In order to ensure optimal Incident response a Joint Incident Management Plan and related playbooks should be available to both MongoDB and HSBC.",
+      "description": "In order to ensure optimal Incident response a Joint Incident Management Plan and related playbooks should be available.",
       "recommendation": "Develop JIMP and associated playbooks and make available to all parties."
     },
     {

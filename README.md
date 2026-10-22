@@ -820,3 +820,4 @@ Add a new check: create a function and call `register({...})` in a file under
 6. host/cluster info from FTDC?
 7. ~~check sub-folder recursively for import~~ — done (dashboard "Import folder…"
    recurses via `webkitdirectory`; CLI `--dir` already walks subfolders)
+8. review the risk catalog, there should be more risk that can be match after adding more logs collectors
